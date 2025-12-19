@@ -150,8 +150,15 @@
                                                 </svg>
                                             </div>
                                             <span class="tool-label">调用 {{ step.tool.name }}</span>
+                                            <!-- 错误信息显示 -->
                                             <span
-                                                v-if="step.tool.result !== undefined"
+                                                v-if="step.tool.status === 'error'"
+                                                class="tool-error"
+                                                >❌ 错误：{{ getErrorPreview(step.tool.result) }}</span
+                                            >
+                                            <!-- 正常结果预览 -->
+                                            <span
+                                                v-else-if="step.tool.result !== undefined && step.tool.status === 'success'"
                                                 class="tool-preview"
                                                 >{{ getResultPreview(step.tool.result) }}</span
                                             >
@@ -175,14 +182,22 @@
                                         <!-- 展开的详细信息 -->
                                         <div v-if="step.tool.expanded" class="tool-details">
                                             <div class="tool-section">
-                                                <div class="section-label">参数</div>
+                                                <div class="section-header">
+                                                    <div class="section-label">参数</div>
+                                                    <button class="copy-btn" @click.stop="copyToClipboard(formatJson(step.tool.args))" title="复制参数">
+                                                        📋 复制
+                                                    </button>
+                                                </div>
                                                 <pre class="section-content">{{ formatJson(step.tool.args) }}</pre>
                                             </div>
                                             <div v-if="step.tool.result !== undefined" class="tool-section">
-                                                <div class="section-label">结果</div>
-                                                <pre class="section-content">{{
-                                                    formatToolResult(step.tool.result)
-                                                }}</pre>
+                                                <div class="section-header">
+                                                    <div class="section-label">结果</div>
+                                                    <button class="copy-btn" @click.stop="copyToClipboard(formatToolResultFull(step.tool.result))" title="复制结果">
+                                                        📋 复制
+                                                    </button>
+                                                </div>
+                                                <pre class="section-content full-result">{{ formatToolResultFull(step.tool.result) }}</pre>
                                             </div>
                                         </div>
                                     </div>
@@ -336,8 +351,12 @@
                                         </div>
                                         <!-- 工具名称 -->
                                         <span class="tool-label">调用 {{ tool.name }}</span>
+                                        <!-- 错误信息显示 -->
+                                        <span v-if="tool.status === 'error'" class="tool-error">
+                                            ❌ 错误：{{ getErrorPreview(tool.result) }}
+                                        </span>
                                         <!-- 结果预览 -->
-                                        <span v-if="tool.result && tool.status === 'success'" class="tool-preview">
+                                        <span v-else-if="tool.result && tool.status === 'success'" class="tool-preview">
                                             {{ getResultPreview(tool.result) }}
                                         </span>
                                         <!-- 耗时 -->
@@ -363,12 +382,22 @@
                                             v-if="tool.args && Object.keys(tool.args).length > 0"
                                             class="detail-section"
                                         >
-                                            <div class="detail-label">参数</div>
+                                            <div class="section-header">
+                                                <div class="detail-label">参数</div>
+                                                <button class="copy-btn" @click.stop="copyToClipboard(formatJson(tool.args))" title="复制参数">
+                                                    📋 复制
+                                                </button>
+                                            </div>
                                             <pre class="detail-code">{{ formatJson(tool.args) }}</pre>
                                         </div>
                                         <div v-if="tool.result !== undefined" class="detail-section">
-                                            <div class="detail-label">结果</div>
-                                            <pre class="detail-code">{{ formatResult(tool.result) }}</pre>
+                                            <div class="section-header">
+                                                <div class="detail-label">结果</div>
+                                                <button class="copy-btn" @click.stop="copyToClipboard(formatToolResultFull(tool.result))" title="复制结果">
+                                                    📋 复制
+                                                </button>
+                                            </div>
+                                            <pre class="detail-code full-result">{{ formatToolResultFull(tool.result) }}</pre>
                                         </div>
                                     </div>
                                 </div>
@@ -525,6 +554,13 @@
                 </p>
             </div>
         </div>
+        
+        <!-- 调试面板 -->
+        <DebugPanel 
+            v-if="showDebugPanel"
+            :logs="debugLogs" 
+            @clear="clearDebugLogs" 
+        />
     </div>
 </template>
 
@@ -533,6 +569,7 @@ import { ref, shallowRef, computed, nextTick, watch, onMounted, onUnmounted, tri
 import { useAppStore } from '@/stores/app'
 import { api } from '@/api'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
+import DebugPanel, { type DebugLog } from '@/components/DebugPanel.vue'
 
 // 工具调用记录
 interface ToolCallRecord {
@@ -622,6 +659,38 @@ const streamingBuffer = ref('')
 const streamingThinkingBuffer = ref('')
 // 滚动动画帧 ID
 let scrollAnimationFrameId: number | null = null
+// 活跃超时定时器（用于检测服务端无响应）
+let activityTimeoutId: number | null = null
+const ACTIVITY_TIMEOUT = 60000 // 60秒无活动超时
+
+// 调试日志
+const debugLogs = ref<DebugLog[]>([])
+const showDebugPanel = ref(true) // 默认显示调试面板
+
+// 添加调试日志
+function addDebugLog(
+    type: DebugLog['type'],
+    tag: string,
+    message: string,
+    data?: unknown
+) {
+    debugLogs.value.push({
+        timestamp: Date.now(),
+        type,
+        tag,
+        message,
+        data
+    })
+    // 限制日志数量
+    if (debugLogs.value.length > 200) {
+        debugLogs.value = debugLogs.value.slice(-150)
+    }
+}
+
+// 清空调试日志
+function clearDebugLogs() {
+    debugLogs.value = []
+}
 
 // 开始思考计时
 function startThinkingTimer() {
@@ -636,6 +705,25 @@ function stopThinkingTimer() {
     if (thinkingTimerInterval) {
         clearInterval(thinkingTimerInterval)
         thinkingTimerInterval = null
+    }
+}
+
+// 重置活跃超时
+function resetActivityTimeout(onTimeout: () => void) {
+    if (activityTimeoutId) {
+        clearTimeout(activityTimeoutId)
+    }
+    activityTimeoutId = window.setTimeout(() => {
+        console.warn('[Chat] Activity timeout - no response from server')
+        onTimeout()
+    }, ACTIVITY_TIMEOUT)
+}
+
+// 清除活跃超时
+function clearActivityTimeout() {
+    if (activityTimeoutId) {
+        clearTimeout(activityTimeoutId)
+        activityTimeoutId = null
     }
 }
 
@@ -896,7 +984,20 @@ function formatJson(obj: unknown): string {
     }
 }
 
-// 格式化工具结果
+// 格式化工具结果（完整版，不截断）
+function formatToolResultFull(result: unknown): string {
+    if (typeof result === 'string') {
+        try {
+            const parsed = JSON.parse(result)
+            return JSON.stringify(parsed, null, 2)
+        } catch {
+            return result
+        }
+    }
+    return formatJson(result)
+}
+
+// 格式化工具结果（用于预览，可能截断）
 function formatToolResult(result: unknown): string {
     if (typeof result === 'string') {
         try {
@@ -907,6 +1008,38 @@ function formatToolResult(result: unknown): string {
         }
     }
     return formatJson(result)
+}
+
+// 复制到剪贴板
+function copyToClipboard(text: string) {
+    navigator.clipboard.writeText(text).then(() => {
+        // 简单提示
+        const msg = document.createElement('div')
+        msg.textContent = '已复制到剪贴板'
+        msg.style.cssText = `
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--accent-color);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            z-index: 10000;
+            animation: fadeInOut 1.5s ease;
+        `
+        document.body.appendChild(msg)
+        setTimeout(() => msg.remove(), 1500)
+    }).catch(() => {
+        // 备用方案
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        document.body.appendChild(textarea)
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+    })
 }
 
 // 解析内容中的 <think> 标签（备用方案）
@@ -952,6 +1085,22 @@ function getResultPreview(result: unknown): string {
     return text.length > 50 ? text.slice(0, 50) + '...' : text
 }
 
+// 获取错误预览
+function getErrorPreview(result: unknown): string {
+    let text = ''
+    if (typeof result === 'string') {
+        text = result
+    } else if (result && typeof result === 'object') {
+        // 尝试提取错误消息
+        const obj = result as Record<string, unknown>
+        text = (obj.message as string) || (obj.error as string) || JSON.stringify(result)
+    } else {
+        text = String(result)
+    }
+    text = text.replace(/[\n\r]+/g, ' ').trim()
+    return text.length > 80 ? text.slice(0, 80) + '...' : text
+}
+
 // 节流滚动到底部
 function throttledScroll() {
     if (!scrollAnimationFrameId) {
@@ -986,6 +1135,7 @@ function stopGeneration() {
         abortController = null
     }
 
+    clearActivityTimeout()
     stopThinkingTimer()
 
     const lastMsg = messages.value[messages.value.length - 1]
@@ -1013,13 +1163,22 @@ async function sendMessage() {
     const message = inputMessage.value.trim()
     if (!message || isGenerating.value) return
 
+    addDebugLog('request', 'SEND', `发送消息: "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}"`, {
+        fullMessage: message,
+        modelId: store.currentModelId,
+        conversationId: store.currentConversationId,
+        isGenerating: isGenerating.value
+    })
+
     inputMessage.value = ''
     if (inputRef.value) {
         inputRef.value.style.height = 'auto'
     }
 
     if (!store.currentConversationId) {
+        addDebugLog('info', 'INIT', '创建新会话')
         await store.createConversation()
+        addDebugLog('success', 'INIT', `会话已创建: ${store.currentConversationId}`)
     }
 
     // 添加用户消息
@@ -1062,16 +1221,73 @@ async function sendMessage() {
     // 获取 aiMsg 的引用（用于更新）
     const getAiMsg = () => messages.value[messages.value.length - 1] as ChatMessage
 
+    // 超时处理函数
+    const handleTimeout = () => {
+        addDebugLog('error', 'TIMEOUT', `请求超时 (${ACTIVITY_TIMEOUT / 1000}秒无响应)`, {
+            streamingBufferLength: streamingBuffer.value.length,
+            streamingThinkingLength: streamingThinkingBuffer.value.length
+        })
+        
+        const aiMsg = getAiMsg()
+        stopThinkingTimer()
+        clearActivityTimeout()
+        
+        // 更新正在运行的工具为超时状态
+        aiMsg.steps.forEach((step) => {
+            if (step.type === 'tool' && step.tool.status === 'running') {
+                step.tool.status = 'error'
+                step.tool.result = '请求超时，服务端无响应'
+            }
+        })
+        
+        // 如果有流式内容，保存它
+        if (streamingBuffer.value) {
+            aiMsg.content = streamingBuffer.value
+        } else if (!aiMsg.content) {
+            aiMsg.content = '请求超时，服务端无响应。请检查网络连接或重试。'
+        }
+        
+        aiMsg.status = 'done'
+        forceUpdate()
+        isGenerating.value = false
+        streamingBuffer.value = ''
+        streamingThinkingBuffer.value = ''
+        
+        if (abortController) {
+            abortController.abort()
+            abortController = null
+        }
+    }
+    
+    // 启动初始活跃超时
+    resetActivityTimeout(handleTimeout)
+    
+    addDebugLog('request', 'API', '开始 SSE 请求', {
+        url: `${api.getBaseUrl()}/api/chat`,
+        modelId: store.currentModelId,
+        conversationId: store.currentConversationId,
+        tools: selectedTools
+    })
+
     abortController = api.chat(message, {
         modelId: store.currentModelId || undefined,
         conversationId: store.currentConversationId || undefined,
         tools: selectedTools,
         onEvent: (event) => {
             const aiMsg = getAiMsg()
+            
+            // 收到任何事件都重置超时
+            resetActivityTimeout(handleTimeout)
+            
+            // 记录所有事件（text_delta 太频繁，只记录摘要）
+            if (event.type !== 'text_delta' && event.type !== 'thinking_delta') {
+                addDebugLog('event', 'SSE', `收到事件: ${event.type}`, event.data)
+            }
 
             switch (event.type) {
                 case 'connected':
                     console.log('[SSE] Connected')
+                    addDebugLog('success', 'SSE', '连接已建立')
                     break
 
                 case 'iteration_start':
@@ -1258,29 +1474,79 @@ async function sendMessage() {
 
                 case 'error':
                     console.error('[SSE] Error:', event.data.error)
-                    aiMsg.content = `错误: ${event.data.error}`
+                    addDebugLog('error', 'SSE', `服务端错误: ${event.data.error}`, event.data)
+                    clearActivityTimeout()
+                    stopThinkingTimer()
+                    
+                    // 更新正在运行的工具为错误状态
+                    aiMsg.steps.forEach((step) => {
+                        if (step.type === 'tool' && step.tool.status === 'running') {
+                            step.tool.status = 'error'
+                            step.tool.result = event.data.error || '未知错误'
+                        }
+                    })
+                    
+                    // 如果有部分内容，保存它
+                    if (streamingBuffer.value) {
+                        aiMsg.content = streamingBuffer.value + `\n\n⚠️ 发生错误: ${event.data.error}`
+                    } else {
+                        aiMsg.content = `❌ 错误: ${event.data.error}`
+                    }
                     aiMsg.status = 'done'
                     forceUpdate()
                     isGenerating.value = false
+                    streamingBuffer.value = ''
+                    streamingThinkingBuffer.value = ''
                     break
 
                 case 'complete':
                     console.log('[SSE] Complete')
+                    addDebugLog('success', 'SSE', '流式响应完成', event.data)
                     break
             }
         },
         onError: (error) => {
             console.error('Chat error:', error)
+            addDebugLog('error', 'FETCH', `请求错误: ${error.message}`, {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+            })
+            clearActivityTimeout()
+            stopThinkingTimer()
+            
             const aiMsg = getAiMsg()
             if (error.name !== 'AbortError') {
-                aiMsg.content = streamingBuffer.value || `错误: ${error.message}`
+                // 更新正在运行的工具为错误状态
+                aiMsg.steps.forEach((step) => {
+                    if (step.type === 'tool' && step.tool.status === 'running') {
+                        step.tool.status = 'error'
+                        step.tool.result = error.message || '请求失败'
+                    }
+                })
+                
+                // 如果有部分内容，保存它
+                if (streamingBuffer.value) {
+                    aiMsg.content = streamingBuffer.value + `\n\n⚠️ 请求失败: ${error.message}`
+                } else {
+                    aiMsg.content = `❌ 请求失败: ${error.message}`
+                }
                 aiMsg.status = 'done'
                 forceUpdate()
+            } else {
+                addDebugLog('warn', 'ABORT', '请求被用户取消')
             }
             isGenerating.value = false
+            streamingBuffer.value = ''
+            streamingThinkingBuffer.value = ''
         },
         onComplete: async () => {
             console.log('[SSE] onComplete called')
+            addDebugLog('success', 'COMPLETE', 'SSE 流已结束', {
+                streamingBufferLength: streamingBuffer.value.length,
+                stepsCount: getAiMsg().steps.length
+            })
+            clearActivityTimeout()
             stopThinkingTimer()
             const aiMsg = getAiMsg()
 
@@ -1332,12 +1598,14 @@ async function saveConversation() {
                 ?.filter((s) => s.type === 'tool')
                 .map((s) => {
                     const tool = (s as { type: 'tool'; tool: ToolCallRecord }).tool
+                    // 将内部 status 转换为 API 兼容的 status
+                    const apiStatus = tool.status === 'running' ? 'executing' : tool.status
                     return {
                         name: tool.name,
                         arguments: tool.args,
                         result: tool.result,
                         duration: tool.duration,
-                        status: tool.status,
+                        status: apiStatus as 'pending' | 'executing' | 'success' | 'error',
                     }
                 })
 
@@ -1355,7 +1623,7 @@ async function saveConversation() {
                             content: s.content,
                             duration: s.duration,
                         }
-                    } else {
+                    } else if (s.type === 'tool') {
                         return {
                             type: 'tool' as const,
                             name: s.tool.name,
@@ -1364,17 +1632,27 @@ async function saveConversation() {
                             duration: s.tool.duration,
                             status: s.tool.status,
                         }
+                    } else {
+                        // todo type
+                        return {
+                            type: 'thinking' as const,
+                            content: `TODO: ${s.todo.title || '任务'}`,
+                            duration: 0,
+                        }
                     }
                 }),
                 toolCalls:
                     toolCallsFromSteps ||
-                    m.toolCalls?.map((tc) => ({
-                        name: tc.name,
-                        arguments: tc.args,
-                        result: tc.result,
-                        duration: tc.duration,
-                        status: tc.status,
-                    })),
+                    m.toolCalls?.map((tc) => {
+                        const apiStatus = tc.status === 'running' ? 'executing' : tc.status
+                        return {
+                            name: tc.name,
+                            arguments: tc.args,
+                            result: tc.result,
+                            duration: tc.duration,
+                            status: apiStatus as 'pending' | 'executing' | 'success' | 'error',
+                        }
+                    }),
             }
         })
         await api.updateConversation(store.currentConversationId, {
@@ -1410,6 +1688,8 @@ onUnmounted(() => {
     if (scrollAnimationFrameId) {
         cancelAnimationFrame(scrollAnimationFrameId)
     }
+    clearActivityTimeout()
+    stopThinkingTimer()
 })
 </script>
 
@@ -1711,6 +1991,17 @@ onUnmounted(() => {
     white-space: nowrap;
 }
 
+.tool-error {
+    flex: 1;
+    min-width: 0;
+    color: var(--error-color);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
 .tool-time {
     font-size: 11px;
     color: var(--text-tertiary);
@@ -1752,13 +2043,36 @@ onUnmounted(() => {
     margin-bottom: 0;
 }
 
+.section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+
 .section-label {
     font-size: 11px;
     font-weight: 600;
     color: var(--text-tertiary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    margin-bottom: 6px;
+}
+
+.copy-btn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.copy-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    border-color: var(--accent-color);
 }
 
 .section-content {
@@ -1774,8 +2088,20 @@ onUnmounted(() => {
     white-space: pre-wrap;
     word-break: break-word;
     overflow-wrap: break-word;
-    max-height: 300px;
+    max-height: 400px;
     overflow-y: auto;
+}
+
+.section-content.full-result {
+    max-height: 500px;
+}
+
+/* 复制成功动画 */
+@keyframes fadeInOut {
+    0% { opacity: 0; transform: translateX(-50%) translateY(10px); }
+    20% { opacity: 1; transform: translateX(-50%) translateY(0); }
+    80% { opacity: 1; transform: translateX(-50%) translateY(0); }
+    100% { opacity: 0; transform: translateX(-50%) translateY(-10px); }
 }
 
 /* JSON 语法高亮效果 */
@@ -1935,10 +2261,16 @@ onUnmounted(() => {
     overflow-x: auto;
     margin: 0;
     color: var(--text-secondary);
-    max-height: 150px;
+    max-height: 300px;
     overflow-y: auto;
     font-family: 'JetBrains Mono', 'SF Mono', Consolas, monospace;
     line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.detail-code.full-result {
+    max-height: 500px;
 }
 
 /* AI 回复文本 */

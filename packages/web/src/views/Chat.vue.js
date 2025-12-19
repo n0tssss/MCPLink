@@ -2,6 +2,7 @@ import { ref, shallowRef, computed, nextTick, watch, onMounted, onUnmounted, tri
 import { useAppStore } from '@/stores/app';
 import { api } from '@/api';
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue';
+import DebugPanel from '@/components/DebugPanel.vue';
 const store = useAppStore();
 const messagesRef = ref(null);
 const inputRef = ref(null);
@@ -21,6 +22,30 @@ const streamingBuffer = ref('');
 const streamingThinkingBuffer = ref('');
 // 滚动动画帧 ID
 let scrollAnimationFrameId = null;
+// 活跃超时定时器（用于检测服务端无响应）
+let activityTimeoutId = null;
+const ACTIVITY_TIMEOUT = 60000; // 60秒无活动超时
+// 调试日志
+const debugLogs = ref([]);
+const showDebugPanel = ref(true); // 默认显示调试面板
+// 添加调试日志
+function addDebugLog(type, tag, message, data) {
+    debugLogs.value.push({
+        timestamp: Date.now(),
+        type,
+        tag,
+        message,
+        data
+    });
+    // 限制日志数量
+    if (debugLogs.value.length > 200) {
+        debugLogs.value = debugLogs.value.slice(-150);
+    }
+}
+// 清空调试日志
+function clearDebugLogs() {
+    debugLogs.value = [];
+}
 // 开始思考计时
 function startThinkingTimer() {
     liveThinkingTime.value = 0;
@@ -33,6 +58,23 @@ function stopThinkingTimer() {
     if (thinkingTimerInterval) {
         clearInterval(thinkingTimerInterval);
         thinkingTimerInterval = null;
+    }
+}
+// 重置活跃超时
+function resetActivityTimeout(onTimeout) {
+    if (activityTimeoutId) {
+        clearTimeout(activityTimeoutId);
+    }
+    activityTimeoutId = window.setTimeout(() => {
+        console.warn('[Chat] Activity timeout - no response from server');
+        onTimeout();
+    }, ACTIVITY_TIMEOUT);
+}
+// 清除活跃超时
+function clearActivityTimeout() {
+    if (activityTimeoutId) {
+        clearTimeout(activityTimeoutId);
+        activityTimeoutId = null;
     }
 }
 // 检查消息是否有工具调用
@@ -269,7 +311,20 @@ function formatJson(obj) {
         return String(obj);
     }
 }
-// 格式化工具结果
+// 格式化工具结果（完整版，不截断）
+function formatToolResultFull(result) {
+    if (typeof result === 'string') {
+        try {
+            const parsed = JSON.parse(result);
+            return JSON.stringify(parsed, null, 2);
+        }
+        catch {
+            return result;
+        }
+    }
+    return formatJson(result);
+}
+// 格式化工具结果（用于预览，可能截断）
 function formatToolResult(result) {
     if (typeof result === 'string') {
         try {
@@ -281,6 +336,37 @@ function formatToolResult(result) {
         }
     }
     return formatJson(result);
+}
+// 复制到剪贴板
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text).then(() => {
+        // 简单提示
+        const msg = document.createElement('div');
+        msg.textContent = '已复制到剪贴板';
+        msg.style.cssText = `
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--accent-color);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            z-index: 10000;
+            animation: fadeInOut 1.5s ease;
+        `;
+        document.body.appendChild(msg);
+        setTimeout(() => msg.remove(), 1500);
+    }).catch(() => {
+        // 备用方案
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+    });
 }
 // 解析内容中的 <think> 标签（备用方案）
 function parseThinkTags(content) {
@@ -321,6 +407,23 @@ function getResultPreview(result) {
     text = text.replace(/[\n\r]+/g, ' ').trim();
     return text.length > 50 ? text.slice(0, 50) + '...' : text;
 }
+// 获取错误预览
+function getErrorPreview(result) {
+    let text = '';
+    if (typeof result === 'string') {
+        text = result;
+    }
+    else if (result && typeof result === 'object') {
+        // 尝试提取错误消息
+        const obj = result;
+        text = obj.message || obj.error || JSON.stringify(result);
+    }
+    else {
+        text = String(result);
+    }
+    text = text.replace(/[\n\r]+/g, ' ').trim();
+    return text.length > 80 ? text.slice(0, 80) + '...' : text;
+}
 // 节流滚动到底部
 function throttledScroll() {
     if (!scrollAnimationFrameId) {
@@ -351,6 +454,7 @@ function stopGeneration() {
         abortController.abort();
         abortController = null;
     }
+    clearActivityTimeout();
     stopThinkingTimer();
     const lastMsg = messages.value[messages.value.length - 1];
     if (lastMsg && lastMsg.role === 'assistant') {
@@ -375,12 +479,20 @@ async function sendMessage() {
     const message = inputMessage.value.trim();
     if (!message || isGenerating.value)
         return;
+    addDebugLog('request', 'SEND', `发送消息: "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}"`, {
+        fullMessage: message,
+        modelId: store.currentModelId,
+        conversationId: store.currentConversationId,
+        isGenerating: isGenerating.value
+    });
     inputMessage.value = '';
     if (inputRef.value) {
         inputRef.value.style.height = 'auto';
     }
     if (!store.currentConversationId) {
+        addDebugLog('info', 'INIT', '创建新会话');
         await store.createConversation();
+        addDebugLog('success', 'INIT', `会话已创建: ${store.currentConversationId}`);
     }
     // 添加用户消息
     const userMsg = {
@@ -415,15 +527,63 @@ async function sendMessage() {
     const toolCallMap = new Map();
     // 获取 aiMsg 的引用（用于更新）
     const getAiMsg = () => messages.value[messages.value.length - 1];
+    // 超时处理函数
+    const handleTimeout = () => {
+        addDebugLog('error', 'TIMEOUT', `请求超时 (${ACTIVITY_TIMEOUT / 1000}秒无响应)`, {
+            streamingBufferLength: streamingBuffer.value.length,
+            streamingThinkingLength: streamingThinkingBuffer.value.length
+        });
+        const aiMsg = getAiMsg();
+        stopThinkingTimer();
+        clearActivityTimeout();
+        // 更新正在运行的工具为超时状态
+        aiMsg.steps.forEach((step) => {
+            if (step.type === 'tool' && step.tool.status === 'running') {
+                step.tool.status = 'error';
+                step.tool.result = '请求超时，服务端无响应';
+            }
+        });
+        // 如果有流式内容，保存它
+        if (streamingBuffer.value) {
+            aiMsg.content = streamingBuffer.value;
+        }
+        else if (!aiMsg.content) {
+            aiMsg.content = '请求超时，服务端无响应。请检查网络连接或重试。';
+        }
+        aiMsg.status = 'done';
+        forceUpdate();
+        isGenerating.value = false;
+        streamingBuffer.value = '';
+        streamingThinkingBuffer.value = '';
+        if (abortController) {
+            abortController.abort();
+            abortController = null;
+        }
+    };
+    // 启动初始活跃超时
+    resetActivityTimeout(handleTimeout);
+    addDebugLog('request', 'API', '开始 SSE 请求', {
+        url: `${api.getBaseUrl()}/api/chat`,
+        modelId: store.currentModelId,
+        conversationId: store.currentConversationId,
+        tools: selectedTools
+    });
     abortController = api.chat(message, {
         modelId: store.currentModelId || undefined,
         conversationId: store.currentConversationId || undefined,
         tools: selectedTools,
         onEvent: (event) => {
             const aiMsg = getAiMsg();
+            // 收到任何事件都重置超时
+            resetActivityTimeout(handleTimeout);
+            // 记录所有事件（text_delta 太频繁，只记录摘要）
+            if (event.type !== 'text_delta' && event.type !== 'thinking_delta') {
+                addDebugLog('event', 'SSE', `收到事件: ${event.type}`, event.data);
+            }
             switch (event.type) {
                 case 'connected':
                     console.log('[SSE] Connected');
+                    addDebugLog('success', 'SSE', '连接已建立');
                     break;
                 case 'iteration_start':
                     console.log('[SSE] Iteration start:', event.data.iteration);
@@ -594,28 +754,77 @@ async function sendMessage() {
                     break;
                 case 'error':
                     console.error('[SSE] Error:', event.data.error);
-                    aiMsg.content = `错误: ${event.data.error}`;
+                    addDebugLog('error', 'SSE', `服务端错误: ${event.data.error}`, event.data);
+                    clearActivityTimeout();
+                    stopThinkingTimer();
+                    // 更新正在运行的工具为错误状态
+                    aiMsg.steps.forEach((step) => {
+                        if (step.type === 'tool' && step.tool.status === 'running') {
+                            step.tool.status = 'error';
+                            step.tool.result = event.data.error || '未知错误';
+                        }
+                    });
+                    // 如果有部分内容，保存它
+                    if (streamingBuffer.value) {
+                        aiMsg.content = streamingBuffer.value + `\n\n⚠️ 发生错误: ${event.data.error}`;
+                    }
+                    else {
+                        aiMsg.content = `❌ 错误: ${event.data.error}`;
+                    }
                     aiMsg.status = 'done';
                     forceUpdate();
                     isGenerating.value = false;
+                    streamingBuffer.value = '';
+                    streamingThinkingBuffer.value = '';
                     break;
                 case 'complete':
                     console.log('[SSE] Complete');
+                    addDebugLog('success', 'SSE', '流式响应完成', event.data);
                     break;
             }
         },
         onError: (error) => {
             console.error('Chat error:', error);
+            addDebugLog('error', 'FETCH', `请求错误: ${error.message}`, {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+            });
+            clearActivityTimeout();
+            stopThinkingTimer();
             const aiMsg = getAiMsg();
             if (error.name !== 'AbortError') {
-                aiMsg.content = streamingBuffer.value || `错误: ${error.message}`;
+                // 更新正在运行的工具为错误状态
+                aiMsg.steps.forEach((step) => {
+                    if (step.type === 'tool' && step.tool.status === 'running') {
+                        step.tool.status = 'error';
+                        step.tool.result = error.message || '请求失败';
+                    }
+                });
+                // 如果有部分内容，保存它
+                if (streamingBuffer.value) {
+                    aiMsg.content = streamingBuffer.value + `\n\n⚠️ 请求失败: ${error.message}`;
+                }
+                else {
+                    aiMsg.content = `❌ 请求失败: ${error.message}`;
+                }
                 aiMsg.status = 'done';
                 forceUpdate();
             }
+            else {
+                addDebugLog('warn', 'ABORT', '请求被用户取消');
+            }
             isGenerating.value = false;
+            streamingBuffer.value = '';
+            streamingThinkingBuffer.value = '';
         },
         onComplete: async () => {
             console.log('[SSE] onComplete called');
+            addDebugLog('success', 'COMPLETE', 'SSE 流已结束', {
+                streamingBufferLength: streamingBuffer.value.length,
+                stepsCount: getAiMsg().steps.length
+            });
+            clearActivityTimeout();
             stopThinkingTimer();
             const aiMsg = getAiMsg();
             // 解析内容中可能残留的 <think> 标签
@@ -660,12 +869,14 @@ async function saveConversation() {
                 ?.filter((s) => s.type === 'tool')
                 .map((s) => {
                 const tool = s.tool;
+                // 将内部 status 转换为 API 兼容的 status
+                const apiStatus = tool.status === 'running' ? 'executing' : tool.status;
                 return {
                     name: tool.name,
                     arguments: tool.args,
                     result: tool.result,
                     duration: tool.duration,
-                    status: tool.status,
+                    status: apiStatus,
                 };
             });
             return {
@@ -683,7 +894,7 @@ async function saveConversation() {
                             duration: s.duration,
                         };
                     }
-                    else {
+                    else if (s.type === 'tool') {
                         return {
                             type: 'tool',
                             name: s.tool.name,
@@ -693,15 +904,26 @@ async function saveConversation() {
                             status: s.tool.status,
                         };
                     }
+                    else {
+                        // todo type
+                        return {
+                            type: 'thinking',
+                            content: `TODO: ${s.todo.title || '任务'}`,
+                            duration: 0,
+                        };
+                    }
                 }),
                 toolCalls: toolCallsFromSteps ||
-                    m.toolCalls?.map((tc) => ({
-                        name: tc.name,
-                        arguments: tc.args,
-                        result: tc.result,
-                        duration: tc.duration,
-                        status: tc.status,
-                    })),
+                    m.toolCalls?.map((tc) => {
+                        const apiStatus = tc.status === 'running' ? 'executing' : tc.status;
+                        return {
+                            name: tc.name,
+                            arguments: tc.args,
+                            result: tc.result,
+                            duration: tc.duration,
+                            status: apiStatus,
+                        };
+                    }),
             };
         });
         await api.updateConversation(store.currentConversationId, {
@@ -731,6 +953,8 @@ onUnmounted(() => {
     if (scrollAnimationFrameId) {
         cancelAnimationFrame(scrollAnimationFrameId);
     }
+    clearActivityTimeout();
+    stopThinkingTimer();
 });
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
@@ -776,6 +1000,8 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['tool-chevron']} */ ;
 /** @type {__VLS_StyleScopedClasses['expanded']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['copy-btn']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-content']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-content']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-content']} */ ;
 /** @type {__VLS_StyleScopedClasses['todo-header']} */ ;
@@ -794,6 +1020,8 @@ let __VLS_directives;
 /** @type {__VLS_StyleScopedClasses['todo-item-text']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-content']} */ ;
 /** @type {__VLS_StyleScopedClasses['detail-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['detail-code']} */ ;
+/** @type {__VLS_StyleScopedClasses['full-result']} */ ;
 /** @type {__VLS_StyleScopedClasses['tools-trigger']} */ ;
 /** @type {__VLS_StyleScopedClasses['tools-trigger']} */ ;
 /** @type {__VLS_StyleScopedClasses['chevron']} */ ;
@@ -1060,7 +1288,13 @@ for (const [msg, index] of __VLS_getVForSourceType((__VLS_ctx.messages))) {
                     ...{ class: "tool-label" },
                 });
                 (step.tool.name);
-                if (step.tool.result !== undefined) {
+                if (step.tool.status === 'error') {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "tool-error" },
+                    });
+                    (__VLS_ctx.getErrorPreview(step.tool.result));
+                }
+                else if (step.tool.result !== undefined && step.tool.status === 'success') {
                     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                         ...{ class: "tool-preview" },
                     });
@@ -1094,7 +1328,25 @@ for (const [msg, index] of __VLS_getVForSourceType((__VLS_ctx.messages))) {
                         ...{ class: "tool-section" },
                     });
                     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                        ...{ class: "section-header" },
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                         ...{ class: "section-label" },
+                    });
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                        ...{ onClick: (...[$event]) => {
+                                if (!!(msg.role === 'user'))
+                                    return;
+                                if (!!(step.type === 'thinking'))
+                                    return;
+                                if (!(step.type === 'tool'))
+                                    return;
+                                if (!(step.tool.expanded))
+                                    return;
+                                __VLS_ctx.copyToClipboard(__VLS_ctx.formatJson(step.tool.args));
+                            } },
+                        ...{ class: "copy-btn" },
+                        title: "复制参数",
                     });
                     __VLS_asFunctionalElement(__VLS_intrinsicElements.pre, __VLS_intrinsicElements.pre)({
                         ...{ class: "section-content" },
@@ -1105,12 +1357,32 @@ for (const [msg, index] of __VLS_getVForSourceType((__VLS_ctx.messages))) {
                             ...{ class: "tool-section" },
                         });
                         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                            ...{ class: "section-header" },
+                        });
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                             ...{ class: "section-label" },
                         });
-                        __VLS_asFunctionalElement(__VLS_intrinsicElements.pre, __VLS_intrinsicElements.pre)({
-                            ...{ class: "section-content" },
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                            ...{ onClick: (...[$event]) => {
+                                    if (!!(msg.role === 'user'))
+                                        return;
+                                    if (!!(step.type === 'thinking'))
+                                        return;
+                                    if (!(step.type === 'tool'))
+                                        return;
+                                    if (!(step.tool.expanded))
+                                        return;
+                                    if (!(step.tool.result !== undefined))
+                                        return;
+                                    __VLS_ctx.copyToClipboard(__VLS_ctx.formatToolResultFull(step.tool.result));
+                                } },
+                            ...{ class: "copy-btn" },
+                            title: "复制结果",
                         });
-                        (__VLS_ctx.formatToolResult(step.tool.result));
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.pre, __VLS_intrinsicElements.pre)({
+                            ...{ class: "section-content full-result" },
+                        });
+                        (__VLS_ctx.formatToolResultFull(step.tool.result));
                     }
                 }
             }
@@ -1343,7 +1615,13 @@ for (const [msg, index] of __VLS_getVForSourceType((__VLS_ctx.messages))) {
                     ...{ class: "tool-label" },
                 });
                 (tool.name);
-                if (tool.result && tool.status === 'success') {
+                if (tool.status === 'error') {
+                    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                        ...{ class: "tool-error" },
+                    });
+                    (__VLS_ctx.getErrorPreview(tool.result));
+                }
+                else if (tool.result && tool.status === 'success') {
                     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
                         ...{ class: "tool-preview" },
                     });
@@ -1378,7 +1656,25 @@ for (const [msg, index] of __VLS_getVForSourceType((__VLS_ctx.messages))) {
                             ...{ class: "detail-section" },
                         });
                         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                            ...{ class: "section-header" },
+                        });
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                             ...{ class: "detail-label" },
+                        });
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                            ...{ onClick: (...[$event]) => {
+                                    if (!!(msg.role === 'user'))
+                                        return;
+                                    if (!(__VLS_ctx.hasToolCalls(msg) && msg.steps.length === 0))
+                                        return;
+                                    if (!(tool.expanded))
+                                        return;
+                                    if (!(tool.args && Object.keys(tool.args).length > 0))
+                                        return;
+                                    __VLS_ctx.copyToClipboard(__VLS_ctx.formatJson(tool.args));
+                                } },
+                            ...{ class: "copy-btn" },
+                            title: "复制参数",
                         });
                         __VLS_asFunctionalElement(__VLS_intrinsicElements.pre, __VLS_intrinsicElements.pre)({
                             ...{ class: "detail-code" },
@@ -1390,12 +1686,30 @@ for (const [msg, index] of __VLS_getVForSourceType((__VLS_ctx.messages))) {
                             ...{ class: "detail-section" },
                         });
                         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                            ...{ class: "section-header" },
+                        });
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
                             ...{ class: "detail-label" },
                         });
-                        __VLS_asFunctionalElement(__VLS_intrinsicElements.pre, __VLS_intrinsicElements.pre)({
-                            ...{ class: "detail-code" },
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+                            ...{ onClick: (...[$event]) => {
+                                    if (!!(msg.role === 'user'))
+                                        return;
+                                    if (!(__VLS_ctx.hasToolCalls(msg) && msg.steps.length === 0))
+                                        return;
+                                    if (!(tool.expanded))
+                                        return;
+                                    if (!(tool.result !== undefined))
+                                        return;
+                                    __VLS_ctx.copyToClipboard(__VLS_ctx.formatToolResultFull(tool.result));
+                                } },
+                            ...{ class: "copy-btn" },
+                            title: "复制结果",
                         });
-                        (__VLS_ctx.formatResult(tool.result));
+                        __VLS_asFunctionalElement(__VLS_intrinsicElements.pre, __VLS_intrinsicElements.pre)({
+                            ...{ class: "detail-code full-result" },
+                        });
+                        (__VLS_ctx.formatToolResultFull(tool.result));
                     }
                 }
             }
@@ -1690,6 +2004,25 @@ else if (__VLS_ctx.store.enabledModels.length === 0) {
 else {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
 }
+if (__VLS_ctx.showDebugPanel) {
+    /** @type {[typeof DebugPanel, ]} */ ;
+    // @ts-ignore
+    const __VLS_7 = __VLS_asFunctionalComponent(DebugPanel, new DebugPanel({
+        ...{ 'onClear': {} },
+        logs: (__VLS_ctx.debugLogs),
+    }));
+    const __VLS_8 = __VLS_7({
+        ...{ 'onClear': {} },
+        logs: (__VLS_ctx.debugLogs),
+    }, ...__VLS_functionalComponentArgsRest(__VLS_7));
+    let __VLS_10;
+    let __VLS_11;
+    let __VLS_12;
+    const __VLS_13 = {
+        onClear: (__VLS_ctx.clearDebugLogs)
+    };
+    var __VLS_9;
+}
 /** @type {__VLS_StyleScopedClasses['chat']} */ ;
 /** @type {__VLS_StyleScopedClasses['messages-container']} */ ;
 /** @type {__VLS_StyleScopedClasses['messages-wrapper']} */ ;
@@ -1719,16 +2052,22 @@ else {
 /** @type {__VLS_StyleScopedClasses['tool-status-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['spinner']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['tool-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-duration']} */ ;
 /** @type {__VLS_StyleScopedClasses['chevron']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-details']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['copy-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-content']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['copy-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['section-content']} */ ;
+/** @type {__VLS_StyleScopedClasses['full-result']} */ ;
 /** @type {__VLS_StyleScopedClasses['todo-block']} */ ;
 /** @type {__VLS_StyleScopedClasses['todo-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['todo-icon']} */ ;
@@ -1758,16 +2097,22 @@ else {
 /** @type {__VLS_StyleScopedClasses['tool-status-icon']} */ ;
 /** @type {__VLS_StyleScopedClasses['spinner']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['tool-error']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-preview']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-time']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-chevron']} */ ;
 /** @type {__VLS_StyleScopedClasses['tool-details']} */ ;
 /** @type {__VLS_StyleScopedClasses['detail-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['detail-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['copy-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['detail-code']} */ ;
 /** @type {__VLS_StyleScopedClasses['detail-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['section-header']} */ ;
 /** @type {__VLS_StyleScopedClasses['detail-label']} */ ;
+/** @type {__VLS_StyleScopedClasses['copy-btn']} */ ;
 /** @type {__VLS_StyleScopedClasses['detail-code']} */ ;
+/** @type {__VLS_StyleScopedClasses['full-result']} */ ;
 /** @type {__VLS_StyleScopedClasses['assistant-text']} */ ;
 /** @type {__VLS_StyleScopedClasses['streaming-text']} */ ;
 /** @type {__VLS_StyleScopedClasses['cursor']} */ ;
@@ -1806,6 +2151,7 @@ const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
             MarkdownRenderer: MarkdownRenderer,
+            DebugPanel: DebugPanel,
             store: store,
             messagesRef: messagesRef,
             inputRef: inputRef,
@@ -1817,6 +2163,9 @@ const __VLS_self = (await import('vue')).defineComponent({
             liveThinkingTime: liveThinkingTime,
             streamingBuffer: streamingBuffer,
             streamingThinkingBuffer: streamingThinkingBuffer,
+            debugLogs: debugLogs,
+            showDebugPanel: showDebugPanel,
+            clearDebugLogs: clearDebugLogs,
             hasToolCalls: hasToolCalls,
             isStreamingText: isStreamingText,
             getStatusText: getStatusText,
@@ -1831,9 +2180,10 @@ const __VLS_self = (await import('vue')).defineComponent({
             autoResize: autoResize,
             handleKeydown: handleKeydown,
             formatJson: formatJson,
-            formatToolResult: formatToolResult,
-            formatResult: formatResult,
+            formatToolResultFull: formatToolResultFull,
+            copyToClipboard: copyToClipboard,
             getResultPreview: getResultPreview,
+            getErrorPreview: getErrorPreview,
             stopGeneration: stopGeneration,
             sendMessage: sendMessage,
         };

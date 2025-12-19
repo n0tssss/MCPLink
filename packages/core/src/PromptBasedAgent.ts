@@ -54,70 +54,56 @@ export class PromptBasedAgent {
     }
 
     /**
+     * 内置的系统提示词（不可修改的核心逻辑）
+     */
+    private readonly BUILT_IN_SYSTEM_PROMPT = `
+## 🚨 强制规则（违反将导致任务失败）
+
+### 输出格式
+需要操作时，**必须**输出：
+<tool_call>
+{"name": "工具名", "arguments": {...}}
+</tool_call>
+
+### 核心原则
+1. **立即行动**：需要查询/操作 → 直接输出 <tool_call>，不说废话
+2. **使用记忆**：工具返回的数据（ID、SKU等）→ 直接用于后续操作
+3. **完成任务**：多步骤逐个完成，不中途停止
+4. **错误处理**：同一错误最多重试2次，然后说明问题停止
+
+### ⛔ 绝对禁止
+- 说"请稍等"、"我来查一下"、"让我处理"后**不**输出 <tool_call>
+- 输出任何文字后结束，而不调用工具
+- 向用户询问工具结果中已有的信息
+
+### ✅ 正确示例
+用户: "查一下发票"
+你的输出:
+<tool_call>
+{"name": "get_invoice", "arguments": {"token": "xxx"}}
+</tool_call>
+
+### ❌ 错误示例
+用户: "查一下发票"
+你的输出: "我将为您查询发票信息，请稍等。"
+（错误！必须输出 <tool_call> 标签）
+`
+
+    /**
      * 构建完整的系统提示词
+     * 结构：用户自定义提示词 + 内置逻辑 + 工具列表
      */
     private buildSystemPrompt(tools: MCPTool[]): string {
         const toolsDescription = this.generateToolsDescription(tools)
-        const basePrompt = this.systemPrompt || '你是一个智能助手。'
+        
+        // 用户自定义提示词（角色设定、配置信息等）
+        const userPrompt = this.systemPrompt || '你是一个智能助手，可以通过调用工具来帮助用户完成任务。'
 
-        return `${basePrompt}
+        return `${userPrompt}
 
-## ⚠️ 最重要的规则 - 必须严格遵守
-
-### 第一步：思考（必须）
-在任何回复之前，你必须首先用 <think> 标签思考：
-<think>
-1. 用户要什么？
-2. 需要使用什么工具？
-3. 如何完成任务？
-</think>
-
-### 第二步：行动（必须）
-思考完成后，你必须立即采取行动：
-- 如果需要使用工具 → 立即输出 <tool_call>
-- 如果不需要工具 → 直接回复用户
-
-**⚠️ 禁止只思考不行动！** 每次思考后必须有后续输出。
-
-### 工具调用格式
-<tool_call>
-{"name": "工具名称", "arguments": {"参数名": "参数值"}}
-</tool_call>
-
-示例（总结网站内容）：
-<think>
-用户要总结 wkea.cn，我需要先获取网站内容，使用 fetch 工具。
-</think>
-<tool_call>
-{"name": "fetch", "arguments": {"url": "http://wkea.cn"}}
-</tool_call>
-
-**重要规则：**
-1. 每次只调用一个工具
-2. 调用工具后停止输出，等待结果
-3. 收到 <tool_result> 后继续处理
-
+${this.BUILT_IN_SYSTEM_PROMPT}
 ### 可用工具
-${toolsDescription}
-
-### 工具结果处理
-收到工具结果后：
-<tool_result name="工具名称" success="true/false">
-{结果内容}
-</tool_result>
-
-你可以：
-1. 根据结果直接回复用户
-2. 继续调用其他工具
-
-### 最终回复
-工具调用完成后，用中文总结并回复用户，不要使用任何标签。
-
-### 重要提醒
-- 所有回复使用中文
-- 思考后必须行动（调用工具或回复）
-- JSON 格式必须正确有效
-- 网站查询类问题必须使用 fetch 工具`
+${toolsDescription}`
     }
 
     /**
@@ -238,12 +224,17 @@ ${toolsDescription}
         }
     ): AsyncGenerator<MCPLinkEvent> {
         const startTime = Date.now()
+        
+        console.log(`[PromptBasedAgent] 🎯 开始处理消息`)
+        console.log(`[PromptBasedAgent]    消息: "${userMessage.slice(0, 80)}${userMessage.length > 80 ? '...' : ''}"`)
+        console.log(`[PromptBasedAgent]    用户系统提示词: "${this.systemPrompt.slice(0, 200)}${this.systemPrompt.length > 200 ? '...' : ''}"`)
 
         // 获取所有可用工具
         let mcpTools = this.mcpManager.getAllTools()
         if (options?.allowedTools && options.allowedTools.length > 0) {
             mcpTools = mcpTools.filter((tool) => options.allowedTools!.includes(tool.name))
         }
+        console.log(`[PromptBasedAgent]    可用工具数量: ${mcpTools.length}`)
 
         // 构建消息历史
         const messages: CoreMessage[] = [{ role: 'system', content: this.buildSystemPrompt(mcpTools) }]
@@ -253,6 +244,7 @@ ${toolsDescription}
             for (const msg of options.history) {
                 messages.push({ role: msg.role, content: msg.content })
             }
+            console.log(`[PromptBasedAgent]    历史消息数量: ${options.history.length}`)
         }
 
         // 添加当前用户消息
@@ -262,6 +254,7 @@ ${toolsDescription}
 
         while (iteration < this.maxIterations) {
             iteration++
+            console.log(`[PromptBasedAgent] 🔄 迭代 ${iteration}/${this.maxIterations}`)
 
             yield {
                 type: MCPLinkEventType.ITERATION_START,
@@ -270,6 +263,7 @@ ${toolsDescription}
             }
 
             // 流式调用模型
+            console.log(`[PromptBasedAgent]    调用模型...`)
             const stream = streamText({
                 model: this.model,
                 messages,
@@ -611,7 +605,9 @@ ${toolsDescription}
                                 data: { content: buffer },
                             }
                             yield { type: MCPLinkEventType.THINKING_END, timestamp: Date.now(), data: {} }
-                        } else if (parseState === 'normal' && hasEndedThinking) {
+                            hasEndedThinking = true
+                        } else if (parseState === 'normal') {
+                            // 不管 hasEndedThinking 状态，都尝试输出剩余内容
                             if (!hasStartedText) {
                                 hasStartedText = true
                                 yield { type: MCPLinkEventType.TEXT_START, timestamp: Date.now(), data: {} }
@@ -622,7 +618,7 @@ ${toolsDescription}
                                 data: { content: buffer },
                             }
                         }
-                        // tool_call 内容不输出
+                        // tool_call 和 todo 状态的内容不直接输出（会在后续处理）
                     }
                     if (hasStartedText) {
                         yield { type: MCPLinkEventType.TEXT_END, timestamp: Date.now(), data: {} }
@@ -632,9 +628,39 @@ ${toolsDescription}
 
             // 检查完整响应中是否有工具调用
             const toolCall = this.parseToolCall(fullResponse)
+            console.log(`[PromptBasedAgent]    响应长度: ${fullResponse.length}, 检测到工具调用: ${toolCall ? toolCall.name : '无'}`)
+            
+            // 如果模型没有输出任何内容，记录警告
+            if (fullResponse.length === 0) {
+                console.warn(`[PromptBasedAgent] ⚠️ 模型没有输出任何内容！`)
+            }
+            
+            // 如果没有检测到工具调用，也没有输出任何文本，尝试将完整响应作为文本输出
+            if (!toolCall && !hasStartedText && fullResponse.trim()) {
+                console.log(`[PromptBasedAgent]    将完整响应作为文本输出`)
+                // 提取纯文本内容（移除可能的标签）
+                let textContent = fullResponse
+                    .replace(/<think>[\s\S]*?<\/think>/gi, '') // 移除 think 标签
+                    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '') // 移除 tool_call 标签
+                    .replace(/<tool_result[\s\S]*?<\/tool_result>/gi, '') // 移除 tool_result 标签
+                    .trim()
+                
+                if (textContent) {
+                    yield { type: MCPLinkEventType.TEXT_START, timestamp: Date.now(), data: {} }
+                    yield {
+                        type: MCPLinkEventType.TEXT_DELTA,
+                        timestamp: Date.now(),
+                        data: { content: textContent },
+                    }
+                    yield { type: MCPLinkEventType.TEXT_END, timestamp: Date.now(), data: {} }
+                    hasStartedText = true
+                }
+            }
 
             if (toolCall) {
                 const toolCallId = `tool-${Date.now()}`
+                console.log(`[PromptBasedAgent] 🔧 调用工具: ${toolCall.name}`)
+                console.log(`[PromptBasedAgent]    参数:`, JSON.stringify(toolCall.arguments).slice(0, 200))
 
                 // 发送工具调用事件
                 yield {
@@ -664,12 +690,15 @@ ${toolsDescription}
 
                 try {
                     result = await this.mcpManager.callTool(toolCall.name, toolCall.arguments)
+                    console.log(`[PromptBasedAgent] ✅ 工具执行成功: ${toolCall.name}`)
                 } catch (error) {
                     result = error instanceof Error ? error.message : String(error)
                     isError = true
+                    console.error(`[PromptBasedAgent] ❌ 工具执行失败: ${toolCall.name}`, error)
                 }
 
                 const duration = Date.now() - toolStartTime
+                console.log(`[PromptBasedAgent]    耗时: ${duration}ms, 错误: ${isError}`)
 
                 // 发送工具结果事件
                 yield {
@@ -690,11 +719,16 @@ ${toolsDescription}
                     content: fullResponse,
                 })
 
-                // 添加工具结果
+                // 添加工具结果，强调必须检查任务完成情况
                 const resultStr = typeof result === 'string' ? result : JSON.stringify(result, null, 2)
                 messages.push({
                     role: 'user',
-                    content: `<tool_result name="${toolCall.name}" success="${!isError}">\n${resultStr}\n</tool_result>\n\n请根据工具结果继续处理。如果任务已完成，请直接回复用户；如果需要更多信息，可以继续调用工具。`,
+                    content: `<tool_result name="${toolCall.name}" success="${!isError}">\n${resultStr}\n</tool_result>
+
+📌 检查点：
+1. 如果是错误：分析原因，检查参数格式是否正确。**相同错误不要重试超过2次**，无法解决则告知用户
+2. 如果成功：记住关键数据，检查任务是否完成
+3. 未完成则继续调用工具，已完成则总结回复`,
                 })
 
                 yield {
@@ -707,7 +741,27 @@ ${toolsDescription}
                 continue
             }
 
-            // 没有工具调用，结束迭代
+            // 没有工具调用，检查是否有任何输出
+            if (!hasStartedText && !hasStartedThinking && fullResponse.trim()) {
+                // 最后的保护：如果有响应但没有任何输出，将响应作为文本发送
+                console.log(`[PromptBasedAgent] ⚠️ 最后保护：发送完整响应作为文本`)
+                yield { type: MCPLinkEventType.TEXT_START, timestamp: Date.now(), data: {} }
+                yield {
+                    type: MCPLinkEventType.TEXT_DELTA,
+                    timestamp: Date.now(),
+                    data: { content: fullResponse },
+                }
+                yield { type: MCPLinkEventType.TEXT_END, timestamp: Date.now(), data: {} }
+            } else if (!hasStartedText && !hasStartedThinking && !fullResponse.trim()) {
+                // 模型完全没有输出
+                console.error(`[PromptBasedAgent] ❌ 模型没有产生任何输出`)
+                yield {
+                    type: MCPLinkEventType.ERROR,
+                    timestamp: Date.now(),
+                    data: { error: new Error('模型没有产生任何响应，请重试') },
+                }
+            }
+            
             yield {
                 type: MCPLinkEventType.ITERATION_END,
                 timestamp: Date.now(),
@@ -717,11 +771,15 @@ ${toolsDescription}
         }
 
         // 完成
+        const totalDuration = Date.now() - startTime
+        console.log(`[PromptBasedAgent] 🏁 处理完成`)
+        console.log(`[PromptBasedAgent]    总耗时: ${totalDuration}ms, 迭代次数: ${iteration}`)
+        
         yield {
             type: MCPLinkEventType.COMPLETE,
             timestamp: Date.now(),
             data: {
-                totalDuration: Date.now() - startTime,
+                totalDuration,
                 totalIterations: iteration,
             },
         }

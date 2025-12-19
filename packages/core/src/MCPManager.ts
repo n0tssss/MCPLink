@@ -260,8 +260,23 @@ export class MCPManager {
                         .map((c) => c.text)
 
                     if (textContents.length > 0) {
-                        return textContents.join('\n')
+                        const textResult = textContents.join('\n')
+                        // 检查是否是错误结果
+                        if (result.isError) {
+                            throw new Error(textResult || '工具执行失败')
+                        }
+                        return textResult
                     }
+                }
+
+                // 检查是否是错误结果
+                if (result.isError) {
+                    const errorContent = result.content
+                    throw new Error(
+                        typeof errorContent === 'string'
+                            ? errorContent
+                            : JSON.stringify(errorContent) || '工具执行失败'
+                    )
                 }
 
                 return result.content

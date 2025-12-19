@@ -148,6 +148,9 @@ export async function chatRoutes(app: FastifyInstance) {
 
         // 立即发送连接成功事件
         sendEvent('connected', { timestamp: Date.now() })
+        
+        console.log(`[Chat] 🚀 开始处理消息: "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}"`)
+        console.log(`[Chat]    模型: ${modelId || '默认'}, 会话: ${conversationId || '无'}`)
 
         try {
             const chatStream = mcpLinkService.chat(
@@ -156,13 +159,28 @@ export async function chatRoutes(app: FastifyInstance) {
                 Object.keys(chatOptions).length > 0 ? chatOptions : undefined
             )
 
+            let eventCount = 0
             for await (const event of chatStream) {
-                sendEvent(event.type, event.data)
+                eventCount++
+                // 详细日志（text_delta 太多，只记录计数）
+                if (event.type !== 'text_delta' && event.type !== 'thinking_delta') {
+                    console.log(`[Chat] 📤 发送事件 #${eventCount}: ${event.type}`, 
+                        event.type === 'tool_result' ? `(${event.data.toolName})` : '')
+                }
+                
+                // 如果是错误事件，提取错误消息
+                if (event.type === 'error' && event.data.error instanceof Error) {
+                    sendEvent(event.type, { error: event.data.error.message })
+                } else {
+                    sendEvent(event.type, event.data)
+                }
             }
 
+            console.log(`[Chat] ✅ 消息处理完成，共发送 ${eventCount} 个事件`)
             res.end()
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error)
+            console.error(`[Chat] ❌ 处理消息时出错:`, error)
             sendEvent('error', { error: errorMessage })
             res.end()
         }

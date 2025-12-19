@@ -1,15 +1,40 @@
 <template>
-    <div class="markdown-body" v-html="renderedContent"></div>
+    <div class="markdown-body" v-html="renderedContent" @click="handleClick"></div>
+    
+    <!-- 图片预览模态框 -->
+    <Teleport to="body">
+        <div v-if="previewImage" class="image-preview-overlay" @click="previewImage = null">
+            <div class="image-preview-container">
+                <img :src="previewImage" class="image-preview" @click.stop />
+                <button class="image-preview-close" @click="previewImage = null">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { marked } from 'marked'
 import hljs from 'highlight.js'
 
 const props = defineProps<{
     content: string
 }>()
+
+const previewImage = ref<string | null>(null)
+
+// 处理点击事件
+function handleClick(e: MouseEvent) {
+    const target = e.target as HTMLElement
+    if (target.tagName === 'IMG' && target.classList.contains('markdown-image')) {
+        previewImage.value = (target as HTMLImageElement).src
+    }
+}
 
 // 配置 marked
 marked.setOptions({
@@ -45,6 +70,16 @@ renderer.codespan = ({ text }: { text: string }) => {
 renderer.link = ({ href, title, text }: any) => {
     const titleAttr = title ? ` title="${title}"` : ''
     return `<a href="${href}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
+}
+
+// 图片 - 限制大小并添加点击预览
+// @ts-ignore - marked v17 类型定义问题
+renderer.image = ({ href, title, text }: any) => {
+    const titleAttr = title ? ` title="${title}"` : ''
+    const altAttr = text ? ` alt="${text}"` : ''
+    return `<div class="markdown-image-wrapper">
+        <img src="${href}"${altAttr}${titleAttr} class="markdown-image" loading="lazy" />
+    </div>`
 }
 
 // 设置渲染器
@@ -123,16 +158,33 @@ const renderedContent = computed(() => {
 .markdown-body ul,
 .markdown-body ol {
     margin: 0.5em 0 1em 0;
-    padding-left: 1.5em;
+    padding-left: 2em;
+}
+
+.markdown-body ul {
+    list-style-type: disc;
+}
+
+.markdown-body ol {
+    list-style-type: decimal;
 }
 
 .markdown-body li {
     margin: 0.25em 0;
+    display: list-item;
 }
 
 .markdown-body li > ul,
 .markdown-body li > ol {
     margin: 0.25em 0;
+}
+
+.markdown-body ul ul {
+    list-style-type: circle;
+}
+
+.markdown-body ul ul ul {
+    list-style-type: square;
 }
 
 /* 行内代码 */
@@ -281,12 +333,101 @@ const renderedContent = computed(() => {
     background: var(--bg-hover);
 }
 
+/* 图片容器 - 单独占一行 */
+.markdown-body .markdown-image-wrapper {
+    display: block;
+    margin: 1em 0;
+}
+
 /* 图片 */
 .markdown-body img {
     max-width: 100%;
     height: auto;
     border-radius: 8px;
     margin: 0.5em 0;
+}
+
+/* Markdown 内嵌图片 - 限制大小 */
+.markdown-body .markdown-image {
+    max-width: 300px;
+    max-height: 200px;
+    object-fit: contain;
+    border-radius: 8px;
+    cursor: zoom-in;
+    transition: all 0.2s ease;
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+}
+
+.markdown-body .markdown-image:hover {
+    border-color: var(--accent-color);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    transform: scale(1.02);
+}
+
+/* 图片预览遮罩 */
+.image-preview-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.9);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: zoom-out;
+    animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* 预览容器 */
+.image-preview-container {
+    position: relative;
+    max-width: 90vw;
+    max-height: 90vh;
+}
+
+/* 预览图片 */
+.image-preview {
+    max-width: 90vw;
+    max-height: 90vh;
+    object-fit: contain;
+    border-radius: 8px;
+    cursor: default;
+    animation: scaleIn 0.2s ease;
+}
+
+@keyframes scaleIn {
+    from { transform: scale(0.9); opacity: 0; }
+    to { transform: scale(1); opacity: 1; }
+}
+
+/* 关闭按钮 */
+.image-preview-close {
+    position: absolute;
+    top: -40px;
+    right: 0;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    color: white;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.image-preview-close:hover {
+    background: rgba(255, 255, 255, 0.2);
 }
 
 /* 任务列表 */

@@ -3,14 +3,15 @@
         <div class="page-header">
             <div>
                 <h2>系统提示词</h2>
-                <p class="description">配置 AI 的系统提示词，指导 AI 如何理解和执行任务。</p>
+                <p class="description">配置 AI 的角色设定和自定义信息（如 token、密钥等）。工具调用逻辑已内置，无需配置。</p>
             </div>
         </div>
 
         <div class="card">
             <div class="form-group">
-                <label class="form-label">系统提示词</label>
-                <textarea class="textarea" v-model="systemPrompt" placeholder="输入系统提示词..." rows="10"></textarea>
+                <label class="form-label">用户自定义提示词</label>
+                <textarea class="textarea" v-model="systemPrompt" placeholder="输入你的自定义提示词，如角色设定、token 等..." rows="10"></textarea>
+                <p class="form-hint">💡 提示：工具调用格式、思考标签等逻辑已内置到程序中，你只需要配置角色设定和自定义参数。</p>
             </div>
 
             <div class="form-group">
@@ -38,8 +39,8 @@
         </div>
 
         <div class="section">
-            <h3>默认提示词参考</h3>
-            <p class="section-desc">点击「重置为默认」可应用以下提示词</p>
+            <h3>提示词模板参考</h3>
+            <p class="section-desc">点击「重置为默认」可应用以下模板</p>
             <div class="default-prompt-card">
                 <pre>{{ defaultPrompt }}</pre>
             </div>
