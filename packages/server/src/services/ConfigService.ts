@@ -173,6 +173,10 @@ export class ConfigService {
         const filtered = conversations.filter((c) => c.id !== id)
         await this.saveConversations(filtered)
     }
+
+    async deleteAllConversations(): Promise<void> {
+        await this.saveConversations([])
+    }
 }
 
 // 单例

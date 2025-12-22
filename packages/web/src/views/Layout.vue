@@ -88,6 +88,27 @@
                         </button>
                     </div>
                 </div>
+
+                <!-- 删除全部对话 -->
+                <div v-if="store.conversations.length > 0" class="clear-all-wrapper">
+                    <button class="clear-all-btn" @click="handleDeleteAllConversations" title="删除全部对话">
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="14"
+                            height="14"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            stroke-width="2"
+                        >
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path
+                                d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"
+                            ></path>
+                        </svg>
+                        <span>删除全部对话</span>
+                    </button>
+                </div>
             </div>
 
             <div class="sidebar-footer">
@@ -200,6 +221,13 @@ async function handleNewChat() {
 async function handleDeleteConversation(id: string) {
     if (confirm('确定要删除这个会话吗？')) {
         await store.deleteConversation(id)
+    }
+}
+
+// 删除全部对话
+async function handleDeleteAllConversations() {
+    if (confirm(`确定要删除全部 ${store.conversations.length} 个会话吗？此操作不可恢复！`)) {
+        await store.deleteAllConversations()
     }
 }
 
@@ -347,6 +375,32 @@ onMounted(() => {
 
 .delete-btn:hover {
     background: var(--bg-active);
+    color: var(--error-color);
+}
+
+.clear-all-wrapper {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-light);
+}
+
+.clear-all-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    background: none;
+    border: none;
+    border-radius: var(--radius-md);
+    color: var(--text-tertiary);
+    font-size: 13px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.clear-all-btn:hover {
+    background: rgba(239, 68, 68, 0.1);
     color: var(--error-color);
 }
 

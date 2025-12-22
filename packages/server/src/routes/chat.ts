@@ -148,7 +148,7 @@ export async function chatRoutes(app: FastifyInstance) {
 
         // 立即发送连接成功事件
         sendEvent('connected', { timestamp: Date.now() })
-        
+
         console.log(`[Chat] 🚀 开始处理消息: "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}"`)
         console.log(`[Chat]    模型: ${modelId || '默认'}, 会话: ${conversationId || '无'}`)
 
@@ -172,7 +172,7 @@ export async function chatRoutes(app: FastifyInstance) {
                 if (event.type === 'error' && event.data.error instanceof Error) {
                     sendEvent(event.type, { error: event.data.error.message })
                 } else {
-                    sendEvent(event.type, event.data)
+                sendEvent(event.type, event.data)
                 }
             }
 
@@ -262,6 +262,15 @@ export async function chatRoutes(app: FastifyInstance) {
         }
 
         await configService.deleteConversation(id)
+        return { success: true }
+    })
+
+    /**
+     * DELETE /api/conversations
+     * 删除全部会话
+     */
+    app.delete('/api/conversations', async () => {
+        await configService.deleteAllConversations()
         return { success: true }
     })
 

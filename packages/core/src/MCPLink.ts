@@ -13,66 +13,84 @@ import type {
 } from './types.js'
 
 /**
- * 支持原生 Reasoning（思考过程）的模型模式列表
- * 只有这些模型会使用 Agent.ts（原生模式）
- * 其他模型使用 PromptBasedAgent 来引导思考
+ * 支持原生 Function Calling（工具调用）的模型模式列表
+ * 这些模型使用 Agent.ts（原生工具调用模式）
+ * 
+ * 注意：某些"思考模型"（thinking models）虽然支持工具调用，
+ * 但需要特殊的 API 处理（如 thought_signature），暂不支持
  */
-const NATIVE_REASONING_PATTERNS = [
-    // Anthropic Claude - 支持原生 reasoning 事件
-    /^claude-3/i,
-    /^claude-2/i,
-    // DeepSeek Reasoner - 支持 reasoning 事件，但需要 PromptBasedAgent 处理工具
-    // 注意：deepseek-reasoner 虽然支持 reasoning，但不支持原生工具调用
-    // OpenAI o1 系列 - 支持 reasoning
-    /^o1/i,
-    /^o3/i,
-]
-
-/**
- * 明确需要使用 Prompt-Based 方式的模型
- * 这些模型：1) 不支持原生 reasoning，或 2) 不支持原生工具调用
- */
-const PROMPT_BASED_PATTERNS = [
-    // DeepSeek 全系列（不支持原生 function calling，需要 prompt 引导工具）
-    /deepseek/i,
-    // OpenAI GPT 全系列（gpt-3.5, gpt-4, gpt-4o, gpt-5 等，都不支持原生 reasoning）
+const NATIVE_FUNCTION_CALLING_PATTERNS = [
+    // OpenAI GPT 系列 - 支持原生 function calling
     /^gpt/i,
-    // Google Gemini（支持工具调用，但不支持原生 reasoning）
-    /^gemini/i,
-    // Mistral（支持工具调用，但不支持原生 reasoning）
+    // OpenAI o1/o3 需要特殊处理，暂用 PromptBased
+    // /^o1/i,
+    // /^o3/i,
+    // Anthropic Claude - 支持原生 function calling
+    /^claude/i,
+    // Google Gemini 稳定版 - 支持原生 function calling
+    // 注意：gemini-*-preview/thinking 版本需要特殊处理，不在此列表
+    /^gemini-[\d.]+-flash$/i,
+    /^gemini-[\d.]+-pro$/i,
+    /^gemini-pro$/i,
+    /^gemini-flash$/i,
+    // Mistral - 支持原生 function calling
     /^mistral/i,
-    // 开源模型
-    /^llama/i,
-    /^phi-/i,
-    /^qwen/i,
     /^mixtral/i,
+    // Cohere Command-R - 支持原生 function calling
     /^command-r/i,
 ]
 
 /**
- * 检测模型是否应该使用原生模式（Agent）还是 Prompt-Based 模式
+ * 需要使用 Prompt-Based 方式的模型
+ * 这些模型：
+ * 1. 不支持原生 function calling
+ * 2. 是"思考模型"，需要特殊 API 处理（如 thought_signature）
+ */
+const PROMPT_BASED_PATTERNS = [
+    // DeepSeek（不支持原生 function calling）
+    /deepseek/i,
+    // OpenAI o1/o3 思考模型
+    /^o1/i,
+    /^o3/i,
+    // Gemini 思考/预览版本 - 需要 thought_signature，暂用 PromptBased
+    /gemini.*preview/i,
+    /gemini.*thinking/i,
+    /gemini.*exp/i,
+    // 开源模型（大多数不支持原生 function calling）
+    /^llama/i,
+    /^phi-/i,
+    /^qwen/i,
+    /^yi-/i,
+    /^glm/i,
+    /^baichuan/i,
+]
+
+/**
+ * 检测模型是否支持原生 Function Calling
  * @param modelId 模型 ID
  * @returns true = 使用原生 Agent, false = 使用 PromptBasedAgent
  */
 function detectNativeToolSupport(modelId: string): boolean {
-    // 先检查是否明确需要 Prompt-Based
+    console.log(`[MCPLink] 🔍 检测模型: "${modelId}"`)
+    
+    // 先检查是否明确需要 Prompt-Based（包括思考模型）
     for (const pattern of PROMPT_BASED_PATTERNS) {
         if (pattern.test(modelId)) {
-            console.log(`[MCPLink] Model "${modelId}" -> PromptBasedAgent (需要引导思考, matched: ${pattern})`)
+            console.log(`[MCPLink] ✅ Model "${modelId}" -> PromptBasedAgent (matched: ${pattern})`)
             return false
         }
     }
 
-    // 检查是否支持原生 reasoning
-    for (const pattern of NATIVE_REASONING_PATTERNS) {
+    // 检查是否支持原生 function calling
+    for (const pattern of NATIVE_FUNCTION_CALLING_PATTERNS) {
         if (pattern.test(modelId)) {
-            console.log(`[MCPLink] Model "${modelId}" -> Agent (支持原生 reasoning, matched: ${pattern})`)
+            console.log(`[MCPLink] ✅ Model "${modelId}" -> Agent (原生模式, matched: ${pattern})`)
             return true
         }
     }
 
-    // 默认使用 Prompt-Based（更安全，兼容所有模型，引导思考）
-    console.log(`[MCPLink] Model "${modelId}" -> PromptBasedAgent (未知模型，默认使用引导模式)`)
+    // 默认使用 Prompt-Based（更安全，兼容未知模型，提供思考过程）
+    console.log(`[MCPLink] ⚠️ Model "${modelId}" -> PromptBasedAgent (未知模型，默认)`)
     return false
 }
 

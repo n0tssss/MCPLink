@@ -196,6 +196,12 @@ export const useAppStore = defineStore('app', () => {
         }
     }
 
+    async function deleteAllConversations() {
+        await api.deleteAllConversations()
+        conversations.value = []
+        currentConversationId.value = null
+    }
+
     function setCurrentConversation(id: string | null) {
         currentConversationId.value = id
     }
@@ -295,6 +301,7 @@ export const useAppStore = defineStore('app', () => {
         fetchConversations,
         createConversation,
         deleteConversation,
+        deleteAllConversations,
         setCurrentConversation,
         updateConversationTitle,
         fetchSettings,

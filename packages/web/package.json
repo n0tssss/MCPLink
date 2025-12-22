@@ -13,12 +13,14 @@
         "@guolao/vue-monaco-editor": "^1.6.0",
         "axios": "^1.7.0",
         "highlight.js": "^11.11.1",
-        "marked": "^17.0.1",
+        "markdown-it": "^14.1.0",
+        "markdown-it-task-lists": "^2.1.1",
         "pinia": "^2.2.0",
         "vue": "^3.5.0",
         "vue-router": "^4.4.0"
     },
     "devDependencies": {
+        "@types/markdown-it": "^14.1.2",
         "@types/node": "^22.0.0",
         "@vitejs/plugin-vue": "^5.2.0",
         "typescript": "^5.6.0",

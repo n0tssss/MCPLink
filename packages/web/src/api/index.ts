@@ -149,6 +149,10 @@ class Api {
         await this.client.delete(`/api/conversations/${id}`)
     }
 
+    async deleteAllConversations(): Promise<void> {
+        await this.client.delete('/api/conversations')
+    }
+
     /**
      * 为会话生成标题
      */

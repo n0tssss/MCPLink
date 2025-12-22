@@ -19,7 +19,9 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { marked } from 'marked'
+import MarkdownIt from 'markdown-it'
+// @ts-ignore
+import taskLists from 'markdown-it-task-lists'
 import hljs from 'highlight.js'
 
 const props = defineProps<{
@@ -36,61 +38,108 @@ function handleClick(e: MouseEvent) {
     }
 }
 
-// 配置 marked
-marked.setOptions({
-    breaks: true,
-    gfm: true,
-})
+// 初始化 markdown-it
+const md = new MarkdownIt({
+    html: true,
+    breaks: true, // 软换行转硬换行
+    linkify: true, // 自动链接
+    highlight: function (str, lang) {
+        if (lang && hljs.getLanguage(lang)) {
+            try {
+                return hljs.highlight(str, { language: lang }).value;
+            } catch (__) {}
+        }
+        return ''; // 使用默认转义
+    }
+});
 
-// 自定义渲染器
-const renderer = new marked.Renderer()
+// 使用任务列表插件
+md.use(taskLists)
 
-// 代码块渲染 - 添加语言标签和复制按钮
-renderer.code = ({ text, lang }: { text: string; lang?: string }) => {
-    const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext'
-    const highlighted = hljs.highlight(text, { language }).value
-    const langLabel = lang || 'code'
+// 自定义 fence (代码块) 渲染
+md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+    const token = tokens[idx];
+    const info = token.info ? md.utils.unescapeAll(token.info).trim() : '';
+    let langName = '';
+    let highlighted;
 
+    if (info) {
+        langName = info.split(/\s+/g)[0];
+    }
+
+    if (options.highlight) {
+        highlighted = options.highlight(token.content, langName, '') || md.utils.escapeHtml(token.content);
+    } else {
+        highlighted = md.utils.escapeHtml(token.content);
+    }
+
+    const langLabel = langName || 'text';
+    
+    // 注入 onclick 脚本以实现复制功能
+    // 注意：这里的 encodeURIComponent 用于防止 XSS 和破坏 HTML 结构
     return `<div class="code-block-wrapper">
     <div class="code-block-header">
       <span class="code-lang">${langLabel}</span>
-      <button class="copy-btn" onclick="navigator.clipboard.writeText(decodeURIComponent('${encodeURIComponent(text)}')).then(() => { this.textContent = '已复制!'; setTimeout(() => this.textContent = '复制', 2000); })">复制</button>
+      <button class="copy-btn" onclick="navigator.clipboard.writeText(decodeURIComponent('${encodeURIComponent(token.content)}')).then(() => { this.textContent = '已复制!'; setTimeout(() => this.textContent = '复制', 2000); })">复制</button>
     </div>
-    <pre class="code-block"><code class="hljs language-${language}">${highlighted}</code></pre>
-  </div>`
-}
-
-// 行内代码
-renderer.codespan = ({ text }: { text: string }) => {
-    return `<code class="inline-code">${text}</code>`
-}
+    <pre class="code-block"><code class="hljs language-${langName}">${highlighted}</code></pre>
+  </div>`;
+};
 
 // 链接 - 新窗口打开
-// @ts-ignore - marked v17 类型定义问题
-renderer.link = ({ href, title, text }: any) => {
-    const titleAttr = title ? ` title="${title}"` : ''
-    return `<a href="${href}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
-}
+// 保存默认规则引用
+const defaultLinkOpen = md.renderer.rules.link_open || function(tokens, idx, options, env, self) {
+    return self.renderToken(tokens, idx, options);
+};
+
+md.renderer.rules.link_open = function (tokens, idx, options, env, self) {
+    // 确保有 attrs 数组
+    if (!tokens[idx].attrs) {
+        tokens[idx].attrs = [];
+    }
+    
+    const aIndex = tokens[idx].attrIndex('target');
+    
+    if (aIndex < 0) {
+        tokens[idx].attrPush(['target', '_blank']);
+    } else {
+        // @ts-ignore
+        tokens[idx].attrs[aIndex][1] = '_blank';
+    }
+    
+    // 添加 noopener noreferrer
+    tokens[idx].attrPush(['rel', 'noopener noreferrer']);
+    
+    return defaultLinkOpen(tokens, idx, options, env, self);
+};
 
 // 图片 - 限制大小并添加点击预览
-// @ts-ignore - marked v17 类型定义问题
-renderer.image = ({ href, title, text }: any) => {
-    const titleAttr = title ? ` title="${title}"` : ''
-    const altAttr = text ? ` alt="${text}"` : ''
+md.renderer.rules.image = function (tokens, idx, options, env, self) {
+    const token = tokens[idx];
+    const src = token.attrGet('src') || '';
+    const alt = token.content;
+    const title = token.attrGet('title') || '';
+    
+    const titleAttr = title ? ` title="${title}"` : '';
+    const altAttr = alt ? ` alt="${alt}"` : '';
+    
     return `<div class="markdown-image-wrapper">
-        <img src="${href}"${altAttr}${titleAttr} class="markdown-image" loading="lazy" />
-    </div>`
-}
+        <img src="${src}"${altAttr}${titleAttr} class="markdown-image" loading="lazy" />
+    </div>`;
+};
 
-// 设置渲染器
-marked.use({ renderer })
+// 行内代码
+md.renderer.rules.code_inline = function (tokens, idx, options, env, self) {
+    const token = tokens[idx];
+    return `<code class="inline-code">${md.utils.escapeHtml(token.content)}</code>`;
+};
 
 // 渲染 markdown
 const renderedContent = computed(() => {
     if (!props.content) return ''
 
     try {
-        return marked.parse(props.content) as string
+        return md.render(props.content)
     } catch (e) {
         console.error('Markdown parse error:', e)
         return props.content

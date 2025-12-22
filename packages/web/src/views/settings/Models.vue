@@ -194,24 +194,40 @@
                         </div>
 
                         <!-- 远程模型列表（可多选） -->
-                        <div v-if="availableModels.length > 0" class="model-select-list">
-                            <label
-                                v-for="model in availableModels"
-                                :key="model"
-                                class="model-checkbox"
-                                :class="{ selected: selectedModels.has(model) }"
-                            >
+                        <div v-if="availableModels.length > 0" class="model-selection-area">
+                            <div class="search-box">
                                 <input
-                                    type="checkbox"
-                                    :checked="selectedModels.has(model)"
-                                    @change="toggleModelSelection(model)"
+                                    type="text"
+                                    class="input input-sm"
+                                    v-model="modelSearchQuery"
+                                    placeholder="搜索模型..."
                                 />
-                                <span class="model-id">{{ model }}</span>
-                            </label>
+                            </div>
+                            <div class="model-select-list">
+                                <label
+                                    v-for="model in filteredModels"
+                                    :key="model"
+                                    class="model-checkbox"
+                                    :class="{ selected: selectedModels.has(model) }"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        :checked="selectedModels.has(model)"
+                                        @change="toggleModelSelection(model)"
+                                    />
+                                    <span class="model-id">{{ model }}</span>
+                                </label>
+                                <div v-if="filteredModels.length === 0" class="no-match">
+                                    没有找到匹配的模型
+                                </div>
+                            </div>
                         </div>
 
-                        <!-- 手动输入（无法获取时） -->
-                        <div v-else class="manual-input-section">
+                        <!-- 手动输入 -->
+                        <div class="manual-input-section">
+                            <div v-if="availableModels.length > 0" class="section-divider">
+                                <span>手动添加</span>
+                            </div>
                             <p class="form-hint">输入模型名称后按 Enter 添加，或用逗号分隔多个模型</p>
                             <div class="input-row">
                                 <input
@@ -261,7 +277,14 @@ const fetchingModels = ref(false)
 const availableModels = ref<string[]>([])
 const selectedModels = ref(new Set<string>())
 const manualModelInput = ref('')
+const modelSearchQuery = ref('')
 const channels = ref<ModelChannel[]>([])
+
+const filteredModels = computed(() => {
+    if (!modelSearchQuery.value.trim()) return availableModels.value
+    const query = modelSearchQuery.value.toLowerCase().trim()
+    return availableModels.value.filter((m) => m.toLowerCase().includes(query))
+})
 
 const form = reactive({
     name: '',
@@ -334,6 +357,7 @@ function showAddChannelModal() {
     availableModels.value = []
     selectedModels.value.clear()
     manualModelInput.value = ''
+    modelSearchQuery.value = ''
     modalVisible.value = true
 }
 
@@ -346,6 +370,7 @@ function editChannel(channel: ModelChannel) {
     availableModels.value = []
     selectedModels.value = new Set(channel.models)
     manualModelInput.value = ''
+    modelSearchQuery.value = ''
     modalVisible.value = true
 }
 
@@ -808,5 +833,50 @@ async function deleteChannel(channel: ModelChannel) {
     to {
         transform: rotate(360deg);
     }
+}
+
+.model-selection-area {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.search-box {
+    margin-bottom: 4px;
+}
+
+.input-sm {
+    padding: 4px 8px;
+    font-size: 12px;
+    height: 30px;
+}
+
+.no-match {
+    grid-column: 1 / -1;
+    text-align: center;
+    color: var(--text-tertiary);
+    padding: 20px;
+    font-size: 13px;
+}
+
+.section-divider {
+    display: flex;
+    align-items: center;
+    margin: 16px 0 12px;
+    color: var(--text-tertiary);
+    font-size: 12px;
+}
+
+.section-divider::before,
+.section-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border-color);
+}
+
+.section-divider span {
+    padding: 0 8px;
 }
 </style>

@@ -1279,10 +1279,8 @@ async function sendMessage() {
             // 收到任何事件都重置超时
             resetActivityTimeout(handleTimeout)
             
-            // 记录所有事件（text_delta 太频繁，只记录摘要）
-            if (event.type !== 'text_delta' && event.type !== 'thinking_delta') {
-                addDebugLog('event', 'SSE', `收到事件: ${event.type}`, event.data)
-            }
+            // 记录所有事件
+            addDebugLog('event', 'SSE', `收到事件: ${event.type}`, event.data)
 
             switch (event.type) {
                 case 'connected':
@@ -1405,13 +1403,50 @@ async function sendMessage() {
                 }
 
                 case 'tool_result': {
-                    console.log('[SSE] Tool result:', event.data.toolName, event.data.duration, 'ms')
-                    const tool = toolCallMap.get(event.data.toolCallId || '')
+                    const resultToolCallId = event.data.toolCallId || ''
+                    console.log('[SSE] Tool result:', event.data.toolName, 'toolCallId:', resultToolCallId, 'duration:', event.data.duration, 'ms')
+                    console.log('[SSE] toolCallMap keys:', Array.from(toolCallMap.keys()))
+                    console.log('[SSE] aiMsg.toolCalls:', aiMsg.toolCalls?.map(t => ({ id: t.id, name: t.name, status: t.status })))
+                    
+                    let tool = toolCallMap.get(resultToolCallId)
+                    
+                    // Fallback 1: 如果通过 ID 找不到，按工具名称查找最近的未完成工具
+                    if (!tool && event.data.toolName && aiMsg.toolCalls) {
+                        console.log('[SSE] Tool not found by ID, searching by name:', event.data.toolName)
+                        tool = aiMsg.toolCalls.find(
+                            (t) => t.name === event.data.toolName && t.status === 'running'
+                        )
+                    }
+                    
+                    // Fallback 2: 如果还是找不到，查找任何同名工具（可能状态已被改变）
+                    if (!tool && event.data.toolName && aiMsg.toolCalls) {
+                        console.log('[SSE] Fallback 2: searching any tool with name:', event.data.toolName)
+                        tool = aiMsg.toolCalls.find(
+                            (t) => t.name === event.data.toolName && !t.result
+                        )
+                    }
+                    
+                    // Fallback 3: 直接从 steps 中查找
+                    if (!tool && event.data.toolName && aiMsg.steps) {
+                        console.log('[SSE] Fallback 3: searching in steps')
+                        const toolStep = aiMsg.steps.find(
+                            (s) => s.type === 'tool' && s.tool.name === event.data.toolName && !s.tool.result
+                        )
+                        if (toolStep && toolStep.type === 'tool') {
+                            tool = toolStep.tool
+                        }
+                    }
+                    
                     if (tool) {
                         tool.result = event.data.toolResult
                         tool.duration = event.data.duration || 0
                         tool.status = event.data.isError ? 'error' : 'success'
+                        console.log('[SSE] Tool status updated to:', tool.status, 'result length:', (event.data.toolResult || '').length)
                         forceUpdate()
+                    } else {
+                        console.error('[SSE] ❌ Tool not found for result:', event.data.toolName, resultToolCallId)
+                        console.error('[SSE] Available tools:', aiMsg.toolCalls)
+                        console.error('[SSE] Available steps:', aiMsg.steps?.filter(s => s.type === 'tool'))
                     }
                     scrollToBottom()
                     break
