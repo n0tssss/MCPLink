@@ -40,6 +40,12 @@ export interface SystemConfig {
      * - false: 使用原生 function calling（需要模型支持）
      */
     usePromptBasedTools?: boolean
+    /**
+     * 是否启用思考阶段（两阶段调用）
+     * - true: 每次迭代先让 AI 思考分析，再执行工具调用（推荐，提高准确性）
+     * - false: 直接调用 AI 并执行工具（默认）
+     */
+    enableThinkingPhase?: boolean
 }
 
 /** 工具调用记录 */

@@ -1,6 +1,6 @@
 import { streamText, type LanguageModel, type CoreMessage } from 'ai'
 import type { MCPManager } from './MCPManager.js'
-import { MCPLinkEventType, type MCPTool, type MCPLinkEvent } from './types.js'
+import { MCPLinkEventType, type MCPTool, type MCPLinkEvent, type ImmediateResultMatcher } from './types.js'
 
 /**
  * 基于 Prompt 的 Agent
@@ -16,6 +16,10 @@ export class PromptBasedAgent {
     private mcpManager: MCPManager
     private systemPrompt: string
     private maxIterations: number
+    private immediateResultMatchers: ImmediateResultMatcher[]
+    private parallelToolCalls: boolean
+    // PromptBasedAgent 本身通过 prompt 实现思考，此配置保留以保持接口一致
+    private enableThinkingPhase: boolean
 
     constructor(
         model: LanguageModel,
@@ -23,12 +27,54 @@ export class PromptBasedAgent {
         options: {
             systemPrompt?: string
             maxIterations?: number
+            immediateResultMatchers?: ImmediateResultMatcher[]
+            parallelToolCalls?: boolean
+            enableThinkingPhase?: boolean
         } = {}
     ) {
         this.model = model
         this.mcpManager = mcpManager
         this.systemPrompt = options.systemPrompt || ''
         this.maxIterations = options.maxIterations || 10
+        this.immediateResultMatchers = options.immediateResultMatchers || []
+        // PromptBasedAgent 每次只解析一个工具调用，此配置保留以保持接口一致
+        this.parallelToolCalls = options.parallelToolCalls ?? true
+        // PromptBasedAgent 本身就通过 prompt 实现思考，无需额外阶段
+        this.enableThinkingPhase = options.enableThinkingPhase ?? false
+    }
+
+    /**
+     * 检查工具返回结果是否匹配即时结果匹配器
+     * @param result 工具返回的结果
+     * @returns 如果匹配返回 true，否则返回 false
+     */
+    private matchImmediateResult(result: unknown): boolean {
+        if (!this.immediateResultMatchers.length) {
+            return false
+        }
+
+        // 结果必须是对象类型
+        if (typeof result !== 'object' || result === null) {
+            return false
+        }
+
+        const resultObj = result as Record<string, unknown>
+
+        // 检查是否匹配任意一个匹配器
+        for (const matcher of this.immediateResultMatchers) {
+            let matched = true
+            for (const [key, value] of Object.entries(matcher)) {
+                if (resultObj[key] !== value) {
+                    matched = false
+                    break
+                }
+            }
+            if (matched) {
+                return true
+            }
+        }
+
+        return false
     }
 
     /**
@@ -467,6 +513,19 @@ ${this.BUILT_IN_PROMPT}`
                     type: MCPLinkEventType.TOOL_RESULT,
                     timestamp: Date.now(),
                     data: { toolName: toolCall.name, toolResult: result, toolCallId, duration, isError },
+                }
+
+                // 检查是否匹配即时结果，如果匹配则发送 IMMEDIATE_RESULT 事件
+                if (!isError && this.matchImmediateResult(result)) {
+                    yield {
+                        type: MCPLinkEventType.IMMEDIATE_RESULT,
+                        timestamp: Date.now(),
+                        data: {
+                            toolName: toolCall.name,
+                            toolCallId,
+                            immediateResult: result,
+                        },
+                    }
                 }
 
                 // 更新消息历史

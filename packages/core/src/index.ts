@@ -8,6 +8,10 @@ export { MCPManager } from './MCPManager.js'
 export { Agent, DEFAULT_SYSTEM_PROMPT } from './Agent.js'
 export { PromptBasedAgent } from './PromptBasedAgent.js'
 
+// AI SDK 重新导出 - 方便用户一站式导入
+export { createOpenAI } from '@ai-sdk/openai'
+export { createAnthropic } from '@ai-sdk/anthropic'
+
 // 类型导出
 export type {
     // 配置类型
@@ -15,6 +19,7 @@ export type {
     MCPServerConfig,
     MCPServerConfigStdio,
     MCPServerConfigSSE,
+    ImmediateResultMatcher,
 
     // 消息类型
     Message,
@@ -35,11 +40,6 @@ export type {
     // MCP 类型
     MCPTool,
     MCPServerStatus,
-
-    // TODO 类型
-    TodoItem,
-    TodoItemStatus,
-    TodoList,
 } from './types.js'
 
 // 事件枚举

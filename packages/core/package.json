@@ -23,7 +23,6 @@
         "test:agent": "npx tsx test/prompt-based-agent.test.ts",
         "test:tool": "npx tsx test/tool-call-test.ts",
         "test:api": "npx tsx test/api-test.ts",
-        "test:todo": "npx tsx test/todo-test.ts",
         "test:thinking": "npx tsx test/thinking-test.ts",
         "test:mock": "npx tsx test/tool-continue-test.ts",
         "test:frontend": "npx tsx test/frontend-simulate-test.ts"

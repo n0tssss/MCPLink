@@ -22,8 +22,31 @@ export interface MCPServerConfigSSE {
     headers?: Record<string, string>
 }
 
+/** MCP 服务器配置 - Streamable HTTP 模式 */
+export interface MCPServerConfigStreamableHTTP {
+    type: 'streamable-http'
+    /** HTTP 服务地址 */
+    url: string
+    /** 请求头 */
+    headers?: Record<string, string>
+}
+
 /** MCP 服务器配置 */
-export type MCPServerConfig = MCPServerConfigStdio | MCPServerConfigSSE
+export type MCPServerConfig = MCPServerConfigStdio | MCPServerConfigSSE | MCPServerConfigStreamableHTTP
+
+/**
+ * 即时结果匹配器
+ * 用于检测 MCP 工具返回的特殊格式数据
+ * 当工具返回的 JSON 包含匹配器中所有的 key-value 时，会立即发送 IMMEDIATE_RESULT 事件
+ * 
+ * @example
+ * // 匹配包含 { type: "card" } 的返回结果
+ * { type: "card" }
+ * 
+ * // 匹配包含 { type: "product_list", isCard: true } 的返回结果
+ * { type: "product_list", isCard: true }
+ */
+export type ImmediateResultMatcher = Record<string, unknown>
 
 /** MCPLink 配置 */
 export interface MCPLinkConfig {
@@ -46,6 +69,37 @@ export interface MCPLinkConfig {
      * - 'auto': 自动检测（默认）
      */
     usePromptBasedTools?: boolean | 'auto'
+    /**
+     * 即时结果匹配器列表
+     * 当 MCP 工具返回的结果匹配任意一个匹配器时，会立即发送 IMMEDIATE_RESULT 事件
+     * 匹配规则：结果 JSON 中包含匹配器的所有 key 且对应的 value 相等
+     * 
+     * @example
+     * immediateResultMatchers: [
+     *   { type: "card" },           // 匹配 { type: "card", ... }
+     *   { type: "product_list" },   // 匹配 { type: "product_list", ... }
+     * ]
+     */
+    immediateResultMatchers?: ImmediateResultMatcher[]
+    /**
+     * 是否启用思考阶段（两阶段调用）
+     * - true: 每次迭代先让 AI 思考分析，再执行工具调用（默认，推荐）
+     * - false: 直接调用 AI 并执行工具（更快但可能不够准确）
+     * 
+     * 启用后的流程：
+     * 1. 思考阶段：AI 分析需求，输出思考过程，决定调用什么工具
+     * 2. 执行阶段：根据思考结果执行工具调用
+     * 
+     * 优点：
+     * - 任何模型都能看到思考过程
+     * - Chain-of-Thought 效应，显著提高复杂任务准确性
+     * 
+     * 缺点：
+     * - 每次迭代多一次 API 调用，增加延迟和成本
+     * 
+     * @default true
+     */
+    enableThinkingPhase?: boolean
 }
 
 // ============ 消息类型 ============
@@ -101,12 +155,12 @@ export enum MCPLinkEventType {
     TOOL_CALL_START = 'tool_call_start',
     /** 工具参数 (流式) */
     TOOL_CALL_DELTA = 'tool_call_delta',
-    /** 工具调用参数完成 */
-    TOOL_CALL_END = 'tool_call_end',
     /** 工具正在执行 */
     TOOL_EXECUTING = 'tool_executing',
     /** 工具返回结果 */
     TOOL_RESULT = 'tool_result',
+    /** 工具返回的即时结果（匹配 immediateResultMatchers 时触发） */
+    IMMEDIATE_RESULT = 'immediate_result',
 
     /** 开始新一轮迭代 */
     ITERATION_START = 'iteration_start',
@@ -117,15 +171,6 @@ export enum MCPLinkEventType {
     COMPLETE = 'complete',
     /** 发生错误 */
     ERROR = 'error',
-
-    /** TODO 列表开始 */
-    TODO_START = 'todo_start',
-    /** 添加 TODO 项 */
-    TODO_ITEM_ADD = 'todo_item_add',
-    /** 更新 TODO 项状态 */
-    TODO_ITEM_UPDATE = 'todo_item_update',
-    /** TODO 列表完成 */
-    TODO_END = 'todo_end',
 }
 
 /** 事件数据 */
@@ -143,13 +188,8 @@ export interface MCPLinkEventData {
     argsTextDelta?: string
     isError?: boolean
     error?: Error
-    // TODO 相关
-    todoId?: string
-    todoTitle?: string
-    todoItemId?: string
-    todoItemContent?: string
-    todoItemStatus?: TodoItemStatus
-    todoItemResult?: string
+    /** 即时结果数据（原封不动的工具返回结果） */
+    immediateResult?: unknown
 }
 
 /** 事件 */
@@ -177,14 +217,6 @@ export interface ChatCallbacks {
     onIterationEnd?: (iteration: number) => void
     /** 发生错误 */
     onError?: (error: Error) => void
-    /** TODO 列表开始 */
-    onTodoStart?: (todoId: string, title: string) => void
-    /** TODO 项添加 */
-    onTodoItemAdd?: (todoId: string, item: TodoItem) => void
-    /** TODO 项更新 */
-    onTodoItemUpdate?: (todoId: string, itemId: string, status: TodoItemStatus, result?: string) => void
-    /** TODO 列表完成 */
-    onTodoEnd?: (todoId: string) => void
 }
 
 // ============ 返回类型 ============
@@ -235,33 +267,4 @@ export interface MCPServerStatus {
     status: 'stopped' | 'starting' | 'running' | 'error'
     tools: MCPTool[]
     error?: string
-}
-
-// ============ TODO 任务类型 ============
-
-/** TODO 项状态 */
-export type TodoItemStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
-
-/** TODO 项 */
-export interface TodoItem {
-    /** 唯一标识 */
-    id: string
-    /** 任务内容 */
-    content: string
-    /** 当前状态 */
-    status: TodoItemStatus
-    /** 完成后的结果摘要 */
-    result?: string
-}
-
-/** TODO 列表 */
-export interface TodoList {
-    /** 唯一标识 */
-    id: string
-    /** 整体任务标题 */
-    title: string
-    /** 任务项列表 */
-    items: TodoItem[]
-    /** 创建时间 */
-    createdAt: number
 }

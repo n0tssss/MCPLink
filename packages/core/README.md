@@ -12,6 +12,7 @@ MCPLink 核心 SDK - AI Agent 工具调用框架，让 AI 轻松调用 MCP 工�
 - 🤖 **多模型支持** - OpenAI、Claude、Gemini、DeepSeek、Qwen 等
 - 🛠️ **MCP 协议** - 完整支持 stdio 和 SSE 两种连接方式
 - 📦 **TypeScript & JavaScript** - 同时支持 TS 和 JS 项目
+- 🎯 **即时结果** - 支持工具返回特定格式时立即推送前端（如卡片消息）
 
 ## 安装
 
@@ -26,32 +27,22 @@ pnpm add @n0ts123/mcplink-core
 yarn add @n0ts123/mcplink-core
 ```
 
-根据你使用的模型，还需要安装对应的 AI SDK：
-
-```bash
-# OpenAI (GPT-4, GPT-3.5)
-npm install @ai-sdk/openai
-
-# Google (Gemini)
-npm install @ai-sdk/google
-
-# Anthropic (Claude)
-npm install @ai-sdk/anthropic
-
-# 兼容 OpenAI 格式的模型 (DeepSeek, Qwen, 等)
-# 使用 @ai-sdk/openai 即可
-```
+> 💡 **内置 AI SDK**：本包已内置 `@ai-sdk/openai` 和 `@ai-sdk/anthropic`，无需额外安装即可直接使用。
+>
+> 如需使用 Google Gemini，需额外安装：`npm install @ai-sdk/google`
 
 ## 快速开始
 
-### TypeScript 示例
+### TypeScript / JavaScript (ESM) 示例
 
 ```typescript
-import { MCPLink } from '@n0ts123/mcplink-core'
-import { createOpenAI } from '@ai-sdk/openai'
+import { MCPLink, createOpenAI } from '@n0ts123/mcplink-core'
 
-// 创建模型
-const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
+// 创建模型（支持 OpenAI 兼容的 API）
+const openai = createOpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: 'https://api.openai.com/v1',  // 可选，默认 OpenAI 官方
+})
 
 // 创建 Agent
 const agent = new MCPLink({
@@ -72,42 +63,13 @@ console.log(result.content)
 await agent.close()
 ```
 
-### JavaScript 示例 (ESM)
-
-```javascript
-import { MCPLink } from '@n0ts123/mcplink-core'
-import { createOpenAI } from '@ai-sdk/openai'
-
-// 创建模型
-const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
-
-// 创建 Agent
-const agent = new MCPLink({
-  model: openai('gpt-4o'),
-  mcpServers: {
-    myTools: {
-      type: 'stdio',
-      command: 'node',
-      args: ['./my-mcp-server.js'],
-    },
-  },
-})
-
-// 初始化并对话
-await agent.initialize()
-const result = await agent.chat('你好')
-console.log(result.content)
-await agent.close()
-```
-
-### JavaScript 示例 (CommonJS)
+### JavaScript (CommonJS) 示例
 
 > ⚠️ 注意：本包是 ES Module，在 CommonJS 环境中需要使用动态 import
 
 ```javascript
 async function main() {
-  const { MCPLink } = await import('@n0ts123/mcplink-core')
-  const { createOpenAI } = await import('@ai-sdk/openai')
+  const { MCPLink, createOpenAI } = await import('@n0ts123/mcplink-core')
 
   const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
@@ -134,7 +96,9 @@ main()
 ### 流式响应
 
 ```typescript
-import { MCPLink, MCPLinkEventType } from '@n0ts123/mcplink-core'
+import { MCPLink, MCPLinkEventType, createOpenAI } from '@n0ts123/mcplink-core'
+
+const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
 const agent = new MCPLink({
   model: openai('gpt-4o'),
@@ -237,6 +201,21 @@ interface MCPLinkConfig {
    * - 'auto' | undefined: 自动检测
    */
   usePromptBasedTools?: boolean | 'auto'
+
+  /**
+   * 是否并行执行工具调用
+   * 当 AI 一次返回多个工具调用时（如同时搜索多个产品），是否并行执行
+   * - true: 并行执行（默认，更快）
+   * - false: 串行执行（按顺序一个一个执行）
+   */
+  parallelToolCalls?: boolean
+
+  /**
+   * 即时结果匹配器
+   * 当 MCP 工具返回的结果匹配任意一个匹配器时，会立即发送 IMMEDIATE_RESULT 事件
+   * 适用于卡片消息、产品列表等需要立即展示给用户的特殊格式数据
+   */
+  immediateResultMatchers?: Array<Record<string, unknown>>
 }
 ```
 
@@ -264,7 +243,7 @@ interface MCPServerConfigSSE {
 ### OpenAI
 
 ```typescript
-import { createOpenAI } from '@ai-sdk/openai'
+import { MCPLink, createOpenAI } from '@n0ts123/mcplink-core'
 
 const openai = createOpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -275,9 +254,26 @@ const agent = new MCPLink({
 })
 ```
 
-### Google Gemini
+### Anthropic Claude
 
 ```typescript
+import { MCPLink, createAnthropic } from '@n0ts123/mcplink-core'
+
+const anthropic = createAnthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+})
+
+const agent = new MCPLink({
+  model: anthropic('claude-3-5-sonnet-20241022'),
+})
+```
+
+### Google Gemini
+
+> 需额外安装：`npm install @ai-sdk/google`
+
+```typescript
+import { MCPLink } from '@n0ts123/mcplink-core'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 
 const google = createGoogleGenerativeAI({
@@ -289,26 +285,12 @@ const agent = new MCPLink({
 })
 ```
 
-### Anthropic Claude
-
-```typescript
-import { createAnthropic } from '@ai-sdk/anthropic'
-
-const anthropic = createAnthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-})
-
-const agent = new MCPLink({
-  model: anthropic('claude-3-5-sonnet-20241022'),
-})
-```
-
 ### 兼容 OpenAI 的模型
 
-DeepSeek、Qwen、GLM 等兼容 OpenAI 格式的模型：
+DeepSeek、Qwen、GLM 等兼容 OpenAI 格式的模型，使用 `createOpenAI` 配置 `baseURL` 即可：
 
 ```typescript
-import { createOpenAI } from '@ai-sdk/openai'
+import { MCPLink, createOpenAI } from '@n0ts123/mcplink-core'
 
 // DeepSeek
 const deepseek = createOpenAI({
@@ -364,6 +346,75 @@ for await (const event of agent.chatStream('搜索产品', {
 }
 ```
 
+## 即时结果（Immediate Result）
+
+当 MCP 工具返回特定格式的数据时（如卡片、产品列表等），可以配置让结果**立即推送给前端**，无需等待 AI 完成思考。
+
+### 使用场景
+
+```
+用户: "帮我搜索 xxx 产品"
+    ↓
+AI 调用 search_products 工具
+    ↓
+工具返回: { type: "card", data: [...] }  ← 匹配配置的格式
+    ↓
+【立即发送 IMMEDIATE_RESULT 事件】 → 前端展示产品卡片
+    ↓
+AI 继续思考，整理最终回复
+```
+
+### 配置方式
+
+```typescript
+const agent = new MCPLink({
+  model: openai('gpt-4o'),
+  mcpServers: { /* ... */ },
+  // 配置即时结果匹配器
+  immediateResultMatchers: [
+    { type: 'card' },           // 匹配 { type: "card", ... }
+    { type: 'product_list' },   // 匹配 { type: "product_list", ... }
+    { isCard: true },           // 匹配 { isCard: true, ... }
+  ],
+})
+```
+
+### 匹配规则
+
+- 工具返回结果必须是 JSON 对象
+- 只要结果**包含**匹配器的所有 key 且 value 相等，就算匹配成功
+- 支持配置多个匹配器，匹配任意一个即触发
+
+```typescript
+// 配置的匹配器
+{ type: "card" }
+
+// ✅ 匹配成功
+{ type: "card", data: [...], message: "xxx" }
+
+// ❌ 匹配失败（type 值不同）
+{ type: "list", data: [...] }
+```
+
+### 前端处理
+
+```typescript
+for await (const event of agent.chatStream('搜索产品')) {
+  switch (event.type) {
+    case MCPLinkEventType.IMMEDIATE_RESULT:
+      // 立即展示卡片/特殊格式数据
+      const cardData = event.data.immediateResult
+      showCard(cardData)
+      break
+      
+    case MCPLinkEventType.TEXT_DELTA:
+      // AI 的最终文字回复
+      appendText(event.data.content)
+      break
+  }
+}
+```
+
 ## 手动工具管理
 
 ```typescript
@@ -400,6 +451,7 @@ await agent.stopMCPServer('myServer')
 | `tool_call_start` | 工具调用开始 | `{ toolName, toolCallId, toolArgs }` |
 | `tool_executing` | 工具执行中 | `{ toolName, toolCallId, toolArgs }` |
 | `tool_result` | 工具执行结果 | `{ toolName, toolResult, toolCallId, duration, isError }` |
+| `immediate_result` | 即时结果（匹配 immediateResultMatchers） | `{ toolName, toolCallId, immediateResult }` |
 | `complete` | 任务完成 | `{ totalDuration, totalIterations }` |
 | `error` | 发生错误 | `{ error }` |
 
@@ -410,8 +462,7 @@ await agent.stopMCPServer('myServer')
 如果你只需要使用特定的 Agent 实现：
 
 ```typescript
-import { Agent, PromptBasedAgent, MCPManager } from '@n0ts123/mcplink-core'
-import { createOpenAI } from '@ai-sdk/openai'
+import { Agent, PromptBasedAgent, MCPManager, createOpenAI } from '@n0ts123/mcplink-core'
 
 const openai = createOpenAI({ apiKey: '...' })
 const mcpManager = new MCPManager()
@@ -490,6 +541,7 @@ import type {
   MCPTool,
   MCPServerStatus,
   ChatResult,
+  ImmediateResultMatcher,
 } from '@n0ts123/mcplink-core'
 
 import { MCPLinkEventType } from '@n0ts123/mcplink-core'

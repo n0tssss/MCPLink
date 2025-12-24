@@ -8,13 +8,15 @@ import {
     type ChatResult,
     type MCPLinkEvent,
     type ToolResult,
+    type ImmediateResultMatcher,
 } from './types.js'
 
 /** 
  * 默认用户提示词
  * 这只是用户自定义的部分，核心工具调用逻辑已内置到代码中
  */
-export const DEFAULT_SYSTEM_PROMPT = `你是一个智能助手，请使用中文回复。`
+export const DEFAULT_SYSTEM_PROMPT = `你是一个智能助手。
+回复要求：简洁直观，不要长篇大论。用列表或表格呈现关键信息。`
 
 /**
  * Agent 引擎
@@ -25,6 +27,9 @@ export class Agent {
     private mcpManager: MCPManager
     private systemPrompt: string
     private maxIterations: number
+    private immediateResultMatchers: ImmediateResultMatcher[]
+    private parallelToolCalls: boolean
+    private enableThinkingPhase: boolean
 
     constructor(
         model: LanguageModel,
@@ -32,12 +37,92 @@ export class Agent {
         options: {
             systemPrompt?: string
             maxIterations?: number
+            immediateResultMatchers?: ImmediateResultMatcher[]
+            parallelToolCalls?: boolean
+            enableThinkingPhase?: boolean
         } = {}
     ) {
         this.model = model
         this.mcpManager = mcpManager
         this.systemPrompt = options.systemPrompt || DEFAULT_SYSTEM_PROMPT
         this.maxIterations = options.maxIterations || 10
+        this.immediateResultMatchers = options.immediateResultMatchers || []
+        this.parallelToolCalls = options.parallelToolCalls ?? true // 默认并行执行
+        this.enableThinkingPhase = options.enableThinkingPhase ?? true // 默认开启，提高准确性
+    }
+
+    /**
+     * 生成工具描述文本（用于思考阶段）
+     */
+    private generateToolsDescription(tools: MCPTool[]): string {
+        if (tools.length === 0) {
+            return '当前没有可用的工具。'
+        }
+
+        let description = ''
+        for (const tool of tools) {
+            description += `### ${tool.name}\n`
+            description += `描述: ${tool.description}\n`
+            if (tool.inputSchema.properties) {
+                description += `参数:\n`
+                for (const [key, prop] of Object.entries(tool.inputSchema.properties)) {
+                    const propInfo = prop as { type?: string; description?: string }
+                    const required = tool.inputSchema.required?.includes(key) ? '必填' : '可选'
+                    description += `  - ${key} (${propInfo.type || 'any'}, ${required}): ${propInfo.description || ''}\n`
+                }
+            }
+            description += '\n'
+        }
+        return description
+    }
+
+    /**
+     * 思考阶段的系统提示词
+     */
+    private readonly THINKING_PHASE_PROMPT = `简要分析用户请求，决定调用什么工具。
+
+## 输出格式（严格遵守，2-3句话）
+1. 用户需求：xxx
+2. 计划：调用 xxx 工具查询 xxx
+
+## 原则
+- 先获取信息再判断，不要空口分析
+- 有相关工具就调用，不要求完全匹配
+- 不要输出工具参数的 JSON
+- 不要长篇大论`
+
+    /**
+     * 检查工具返回结果是否匹配即时结果匹配器
+     * @param result 工具返回的结果
+     * @returns 如果匹配返回 true，否则返回 false
+     */
+    private matchImmediateResult(result: unknown): boolean {
+        if (!this.immediateResultMatchers.length) {
+            return false
+        }
+
+        // 结果必须是对象类型
+        if (typeof result !== 'object' || result === null) {
+            return false
+        }
+
+        const resultObj = result as Record<string, unknown>
+
+        // 检查是否匹配任意一个匹配器
+        for (const matcher of this.immediateResultMatchers) {
+            let matched = true
+            for (const [key, value] of Object.entries(matcher)) {
+                if (resultObj[key] !== value) {
+                    matched = false
+                    break
+                }
+            }
+            if (matched) {
+                return true
+            }
+        }
+
+        return false
     }
 
     /**
@@ -60,58 +145,110 @@ export class Agent {
     }
 
     /**
-     * 简单的 JSON Schema 到 Zod 转换
+     * JSON Schema 到 Zod 的完整递归转换
+     * 支持嵌套对象、对象数组、枚举等所有常见类型
      */
     private jsonSchemaToZod(schema: MCPTool['inputSchema']): z.ZodType {
-        if (!schema.properties) {
-            return z.object({})
-        }
+        return this.convertSchemaToZod(schema, schema.required || [])
+    }
 
-        const shape: Record<string, z.ZodType> = {}
-        const required = schema.required || []
+    /**
+     * 递归转换 JSON Schema 节点为 Zod 类型
+     */
+    private convertSchemaToZod(
+        schema: Record<string, unknown>,
+        parentRequired: string[] = [],
+        key?: string
+    ): z.ZodType {
+        const type = schema.type as string | undefined
+        const description = schema.description as string | undefined
+        const enumValues = schema.enum as unknown[] | undefined
 
-        for (const [key, prop] of Object.entries(schema.properties)) {
-            const propSchema = prop as { type?: string; description?: string; items?: { type?: string } }
-            let zodType: z.ZodType
+        let zodType: z.ZodType
 
-            switch (propSchema.type) {
+        // 处理枚举类型
+        if (enumValues && enumValues.length > 0) {
+            if (enumValues.every((v) => typeof v === 'string')) {
+                zodType = z.enum(enumValues as [string, ...string[]])
+            } else if (enumValues.every((v) => typeof v === 'number')) {
+                // 数字枚举：用 union of literals
+                const literals = enumValues.map((v) => z.literal(v as number))
+                zodType = literals.length === 1 
+                    ? literals[0] 
+                    : z.union([literals[0], literals[1], ...literals.slice(2)] as [z.ZodTypeAny, z.ZodTypeAny, ...z.ZodTypeAny[]])
+            } else {
+                // 混合枚举或其他类型：降级为 unknown
+                zodType = z.unknown()
+            }
+        } else {
+            switch (type) {
                 case 'string':
                     zodType = z.string()
                     break
+
                 case 'number':
                     zodType = z.number()
                     break
+
                 case 'integer':
                     zodType = z.number().int()
                     break
+
                 case 'boolean':
                     zodType = z.boolean()
                     break
-                case 'array':
-                    if (propSchema.items?.type === 'string') {
-                        zodType = z.array(z.string())
-                    } else if (propSchema.items?.type === 'number') {
-                        zodType = z.array(z.number())
+
+                case 'null':
+                    zodType = z.null()
+                    break
+
+                case 'object': {
+                    const properties = schema.properties as Record<string, Record<string, unknown>> | undefined
+                    const required = (schema.required as string[]) || []
+
+                    if (properties) {
+                        const shape: Record<string, z.ZodType> = {}
+                        for (const [propKey, propSchema] of Object.entries(properties)) {
+                            let propZod = this.convertSchemaToZod(propSchema, required, propKey)
+
+                            // 处理 optional
+                            if (!required.includes(propKey)) {
+                                propZod = propZod.optional()
+                            }
+
+                            shape[propKey] = propZod
+                        }
+                        zodType = z.object(shape)
+                    } else {
+                        // 没有 properties 定义的对象，允许任意键值
+                        zodType = z.record(z.unknown())
+                    }
+                    break
+                }
+
+                case 'array': {
+                    const items = schema.items as Record<string, unknown> | undefined
+                    if (items) {
+                        const itemsRequired = (items.required as string[]) || []
+                        zodType = z.array(this.convertSchemaToZod(items, itemsRequired))
                     } else {
                         zodType = z.array(z.unknown())
                     }
                     break
+                }
+
                 default:
+                    // 未知类型或没有类型定义
                     zodType = z.unknown()
             }
-
-            if (propSchema.description) {
-                zodType = zodType.describe(propSchema.description)
-            }
-
-            if (!required.includes(key)) {
-                zodType = zodType.optional()
-            }
-
-            shape[key] = zodType
         }
 
-        return z.object(shape)
+        // 添加描述
+        if (description) {
+            zodType = zodType.describe(description)
+        }
+
+        return zodType
     }
 
     /**
@@ -312,6 +449,59 @@ export class Agent {
                 data: { iteration, maxIterations: this.maxIterations },
             }
 
+            // ============ 思考阶段（如果启用）============
+            if (this.enableThinkingPhase && hasTools) {
+                yield {
+                    type: MCPLinkEventType.THINKING_START,
+                    timestamp: Date.now(),
+                    data: {},
+                }
+
+                // 构建思考阶段的消息
+                const toolsDescription = this.generateToolsDescription(mcpTools)
+                const thinkingMessages: CoreMessage[] = [
+                    { 
+                        role: 'system', 
+                        content: `${this.systemPrompt}\n\n${this.THINKING_PHASE_PROMPT}\n\n## 可用工具\n${toolsDescription}` 
+                    },
+                    ...messages.slice(1), // 跳过原来的 system 消息，使用历史消息
+                ]
+
+                // 思考阶段调用（不带工具，强制输出文本）
+                const thinkingStream = streamText({
+                    model: this.model,
+                    messages: thinkingMessages,
+                    // 不传 tools，强制 AI 输出文本思考
+                })
+
+                let thinkingContent = ''
+                for await (const chunk of thinkingStream.fullStream) {
+                    if (chunk.type === 'text-delta') {
+                        thinkingContent += chunk.textDelta
+                        yield {
+                            type: MCPLinkEventType.THINKING_DELTA,
+                            timestamp: Date.now(),
+                            data: { content: chunk.textDelta },
+                        }
+                    }
+                }
+
+                yield {
+                    type: MCPLinkEventType.THINKING_END,
+                    timestamp: Date.now(),
+                    data: {},
+                }
+
+                // 将思考结果添加到消息历史，帮助 AI 更好地执行
+                if (thinkingContent) {
+                    messages.push({
+                        role: 'assistant',
+                        content: `[思考过程]\n${thinkingContent}`,
+                    })
+                }
+            }
+
+            // ============ 执行阶段 ============
             // 使用 streamText 进行流式调用
             const stream = streamText({
                 model: this.model,
@@ -483,12 +673,13 @@ export class Agent {
                                 },
                             }
                             sentToolCallStarts.add(chunk.toolCallId)
+                            // 只在首次收到时添加到工具调用列表，避免重复执行
+                            toolCalls.push({
+                                toolCallId: chunk.toolCallId,
+                                toolName: chunk.toolName,
+                                args: chunk.args as Record<string, unknown>,
+                            })
                         }
-                        toolCalls.push({
-                            toolCallId: chunk.toolCallId,
-                            toolName: chunk.toolName,
-                            args: chunk.args as Record<string, unknown>,
-                        })
                         break
 
                     case 'tool-call-streaming-start':
@@ -608,59 +799,149 @@ export class Agent {
             // 执行工具调用
             const toolResults: ToolResult[] = []
 
+            // 先发送所有工具的执行中状态
             for (const toolCall of toolCalls) {
-                const toolName = toolCall.toolName
-                const toolArgs = toolCall.args
-                const toolCallId = toolCall.toolCallId
-
-                // 发送执行中状态
                 yield {
                     type: MCPLinkEventType.TOOL_EXECUTING,
                     timestamp: Date.now(),
-                    data: { toolName, toolCallId, toolArgs },
-                }
-
-                // 执行工具
-                const toolStartTime = Date.now()
-                let result: unknown
-                let isError = false
-
-                try {
-                    result = await this.mcpManager.callTool(toolName, toolArgs)
-                } catch (error) {
-                    result = error instanceof Error ? error.message : String(error)
-                    isError = true
-                }
-
-                const duration = Date.now() - toolStartTime
-
-                // 发送结果
-                yield {
-                    type: MCPLinkEventType.TOOL_RESULT,
-                    timestamp: Date.now(),
-                    data: {
-                        toolName,
-                        toolResult: result,
-                        toolCallId,
-                        duration,
-                        isError,
+                    data: { 
+                        toolName: toolCall.toolName, 
+                        toolCallId: toolCall.toolCallId, 
+                        toolArgs: toolCall.args 
                     },
                 }
+            }
 
-                toolResults.push({
-                    toolCallId,
-                    toolName,
-                    result,
-                    isError,
-                    duration,
+            // 根据配置决定是并行还是串行执行
+            if (this.parallelToolCalls && toolCalls.length > 1) {
+                // 并行执行所有工具
+                const executePromises = toolCalls.map(async (toolCall) => {
+                    const toolStartTime = Date.now()
+                    let result: unknown
+                    let isError = false
+
+                    try {
+                        result = await this.mcpManager.callTool(toolCall.toolName, toolCall.args)
+                    } catch (error) {
+                        result = error instanceof Error ? error.message : String(error)
+                        isError = true
+                    }
+
+                    const duration = Date.now() - toolStartTime
+                    return {
+                        toolCallId: toolCall.toolCallId,
+                        toolName: toolCall.toolName,
+                        args: toolCall.args,
+                        result,
+                        isError,
+                        duration,
+                    }
                 })
 
-                toolCallRecords.push({
-                    name: toolName,
-                    arguments: toolArgs,
-                    result,
-                    duration,
-                })
+                const results = await Promise.all(executePromises)
+
+                // 按顺序发送结果事件
+                for (const r of results) {
+                    yield {
+                        type: MCPLinkEventType.TOOL_RESULT,
+                        timestamp: Date.now(),
+                        data: {
+                            toolName: r.toolName,
+                            toolResult: r.result,
+                            toolCallId: r.toolCallId,
+                            duration: r.duration,
+                            isError: r.isError,
+                        },
+                    }
+
+                    // 检查是否匹配即时结果
+                    if (!r.isError && this.matchImmediateResult(r.result)) {
+                        yield {
+                            type: MCPLinkEventType.IMMEDIATE_RESULT,
+                            timestamp: Date.now(),
+                            data: {
+                                toolName: r.toolName,
+                                toolCallId: r.toolCallId,
+                                immediateResult: r.result,
+                            },
+                        }
+                    }
+
+                    toolResults.push({
+                        toolCallId: r.toolCallId,
+                        toolName: r.toolName,
+                        result: r.result,
+                        isError: r.isError,
+                        duration: r.duration,
+                    })
+
+                    toolCallRecords.push({
+                        name: r.toolName,
+                        arguments: r.args,
+                        result: r.result,
+                        duration: r.duration,
+                    })
+                }
+            } else {
+                // 串行执行工具
+                for (const toolCall of toolCalls) {
+                    const toolName = toolCall.toolName
+                    const toolArgs = toolCall.args
+                    const toolCallId = toolCall.toolCallId
+
+                    const toolStartTime = Date.now()
+                    let result: unknown
+                    let isError = false
+
+                    try {
+                        result = await this.mcpManager.callTool(toolName, toolArgs)
+                    } catch (error) {
+                        result = error instanceof Error ? error.message : String(error)
+                        isError = true
+                    }
+
+                    const duration = Date.now() - toolStartTime
+
+                    yield {
+                        type: MCPLinkEventType.TOOL_RESULT,
+                        timestamp: Date.now(),
+                        data: {
+                            toolName,
+                            toolResult: result,
+                            toolCallId,
+                            duration,
+                            isError,
+                        },
+                    }
+
+                    // 检查是否匹配即时结果
+                    if (!isError && this.matchImmediateResult(result)) {
+                        yield {
+                            type: MCPLinkEventType.IMMEDIATE_RESULT,
+                            timestamp: Date.now(),
+                            data: {
+                                toolName,
+                                toolCallId,
+                                immediateResult: result,
+                            },
+                        }
+                    }
+
+                    toolResults.push({
+                        toolCallId,
+                        toolName,
+                        result,
+                        isError,
+                        duration,
+                    })
+
+                    toolCallRecords.push({
+                        name: toolName,
+                        arguments: toolArgs,
+                        result,
+                        duration,
+                    })
+                }
             }
 
             // 更新消息历史
