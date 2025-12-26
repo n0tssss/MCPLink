@@ -109,6 +109,7 @@ export class MCPLinkService {
             maxIterations: settings.maxIterations,
             usePromptBasedTools: settings.usePromptBasedTools,
             enableThinkingPhase: settings.enableThinkingPhase,
+            immediateResultMatchers: settings.immediateResultMatchers,
         })
 
         this.currentModelId = modelConfig.id

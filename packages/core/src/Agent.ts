@@ -25,21 +25,10 @@ export const DEFAULT_SYSTEM_PROMPT = `你是一个专业、友好的智能助手
 
 /**
  * 默认思考阶段提示词
- * 用于引导 AI 在调用工具前进行分析思考
+ * 用于引导 AI 在调用工具前进行简短分析
  */
-export const DEFAULT_THINKING_PHASE_PROMPT = `你正在思考如何帮助用户。请用自然的内心独白方式分析：
-
-1. 用户的真正需求是什么？
-2. 我目前了解到哪些相关信息？
-3. 接下来我应该怎么做才能更好地帮助用户？
-
-重要规则：
-- 像在脑海中思考一样自然表达，不要使用技术术语
-- 绝对不要在思考过程中提及、重复或暴露任何标识符、密钥、令牌、凭证或系统内部信息
-- 不要展示或描述任何数据结构、格式或技术实现细节
-- 只关注用户的实际问题和你的分析思路
-- 说清楚你理解了什么，以及你打算如何帮助用户
-- 这是内部思考过程，不要输出给用户看的正式回复或最终结果`
+export const DEFAULT_THINKING_PHASE_PROMPT = `简要分析用户需求，决定下一步行动。
+要求：1-2句话说明意图，直接决定用什么工具。不要暴露系统内部信息。`
 
 /**
  * Agent 引擎
@@ -113,12 +102,25 @@ export class Agent {
             return false
         }
 
-        // 结果必须是对象类型
-        if (typeof result !== 'object' || result === null) {
-            return false
+        let resultObj: Record<string, unknown> | null = null
+
+        // 如果是字符串，尝试解析为 JSON 对象
+        if (typeof result === 'string') {
+            try {
+                const parsed = JSON.parse(result)
+                if (typeof parsed === 'object' && parsed !== null) {
+                    resultObj = parsed
+                }
+            } catch {
+                // 不是有效 JSON，忽略
+            }
+        } else if (typeof result === 'object' && result !== null) {
+            resultObj = result as Record<string, unknown>
         }
 
-        const resultObj = result as Record<string, unknown>
+        if (!resultObj) {
+            return false
+        }
 
         // 检查是否匹配任意一个匹配器
         for (const matcher of this.immediateResultMatchers) {
@@ -824,6 +826,9 @@ export class Agent {
                 }
             }
 
+            // 是否匹配到即时结果（匹配后直接结束，无需 AI 继续处理）
+            let hasImmediateResult = false
+
             // 根据配置决定是并行还是串行执行
             if (this.parallelToolCalls && toolCalls.length > 1) {
                 // 并行执行所有工具
@@ -868,6 +873,7 @@ export class Agent {
 
                     // 检查是否匹配即时结果
                     if (!r.isError && this.matchImmediateResult(r.result)) {
+                        hasImmediateResult = true
                         yield {
                             type: MCPLinkEventType.IMMEDIATE_RESULT,
                             timestamp: Date.now(),
@@ -928,6 +934,7 @@ export class Agent {
 
                     // 检查是否匹配即时结果
                     if (!isError && this.matchImmediateResult(result)) {
+                        hasImmediateResult = true
                         yield {
                             type: MCPLinkEventType.IMMEDIATE_RESULT,
                             timestamp: Date.now(),
@@ -954,6 +961,16 @@ export class Agent {
                         duration,
                     })
                 }
+            }
+
+            // 如果匹配到即时结果，直接结束迭代（无需 AI 继续思考处理）
+            if (hasImmediateResult) {
+                yield {
+                    type: MCPLinkEventType.ITERATION_END,
+                    timestamp: Date.now(),
+                    data: { iteration },
+                }
+                break
             }
 
             // 更新消息历史

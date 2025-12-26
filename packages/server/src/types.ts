@@ -46,6 +46,18 @@ export interface SystemConfig {
      * - false: 直接调用 AI 并执行工具（默认）
      */
     enableThinkingPhase?: boolean
+    /**
+     * 即时结果匹配器列表
+     * 当 MCP 工具返回的结果匹配任意一个匹配器时，会立即结束对话（无需 AI 继续处理）
+     * 匹配规则：结果 JSON 中包含匹配器的所有 key 且对应的 value 相等
+     * 
+     * @example
+     * [
+     *   { "type": "card" },           // 匹配 { type: "card", ... }
+     *   { "type": "product_list" },   // 匹配 { type: "product_list", ... }
+     * ]
+     */
+    immediateResultMatchers?: Array<Record<string, unknown>>
 }
 
 /** 工具调用记录 */

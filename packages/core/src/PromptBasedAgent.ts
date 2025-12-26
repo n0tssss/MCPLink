@@ -53,12 +53,25 @@ export class PromptBasedAgent {
             return false
         }
 
-        // 结果必须是对象类型
-        if (typeof result !== 'object' || result === null) {
-            return false
+        let resultObj: Record<string, unknown> | null = null
+
+        // 如果是字符串，尝试解析为 JSON 对象
+        if (typeof result === 'string') {
+            try {
+                const parsed = JSON.parse(result)
+                if (typeof parsed === 'object' && parsed !== null) {
+                    resultObj = parsed
+                }
+            } catch {
+                // 不是有效 JSON，忽略
+            }
+        } else if (typeof result === 'object' && result !== null) {
+            resultObj = result as Record<string, unknown>
         }
 
-        const resultObj = result as Record<string, unknown>
+        if (!resultObj) {
+            return false
+        }
 
         // 检查是否匹配任意一个匹配器
         for (const matcher of this.immediateResultMatchers) {
@@ -515,7 +528,7 @@ ${this.BUILT_IN_PROMPT}`
                     data: { toolName: toolCall.name, toolResult: result, toolCallId, duration, isError },
                 }
 
-                // 检查是否匹配即时结果，如果匹配则发送 IMMEDIATE_RESULT 事件
+                // 检查是否匹配即时结果，如果匹配则直接结束（无需 AI 继续思考处理）
                 if (!isError && this.matchImmediateResult(result)) {
                     yield {
                         type: MCPLinkEventType.IMMEDIATE_RESULT,
@@ -526,6 +539,14 @@ ${this.BUILT_IN_PROMPT}`
                             immediateResult: result,
                         },
                     }
+                    // 直接结束迭代
+                    yield { type: MCPLinkEventType.ITERATION_END, timestamp: Date.now(), data: { iteration } }
+                    yield {
+                        type: MCPLinkEventType.COMPLETE,
+                        timestamp: Date.now(),
+                        data: { totalDuration: Date.now() - startTime, totalIterations: iteration },
+                    }
+                    return
                 }
 
                 // 更新消息历史
